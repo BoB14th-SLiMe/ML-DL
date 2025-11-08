@@ -47,7 +47,7 @@ from numpy.linalg import norm
 # }
 
 CONFIG = { # 갱신 후
-    "limit": 10000,
+    "limit": 100000,
     "window_step": 1,
     "adaptive_threshold": False,
     "threshold_factor": 2.0,
@@ -161,7 +161,7 @@ def get_model_window_size(model):
 
 
 def load_sequences_from_jsonl(path, window_size=14, overlap=1, limit=10000):
-    packets = []
+    packets, raw_packets = [], []
     with open(path, "r", encoding="utf-8") as f:
         for line_idx, line in enumerate(tqdm(f, desc=f"Parsing JSONL (limit={limit})")):
             if line_idx >= limit:
@@ -171,20 +171,26 @@ def load_sequences_from_jsonl(path, window_size=14, overlap=1, limit=10000):
             try:
                 pkt = json.loads(line)
                 packets.append(extract_features(pkt))
+                # 🔹 원본 전체 JSON 보존
+                raw_packets.append(pkt)
             except Exception:
                 continue
 
     total_packets = len(packets)
     logger.info(f"📦 Loaded {total_packets} packets (limited to {limit}) from {path}")
 
-    sequences = []
+    sequences, seq_raw = [], []
     step = CONFIG["window_step"]
     for i in range(0, total_packets - window_size + 1, step):
         window = packets[i: i + window_size]
-        sequences.append(np.array(window, dtype="float32"))
+        raw_window = raw_packets[i: i + window_size]
+        sequences.append(np.array(window, dtype="float32"))  # ✅ 반드시 numpy 배열로 변환해야 함
+        seq_raw.append(raw_window)
+
 
     logger.info(f"📂 Generated {len(sequences)} windows (size={window_size}, step={step})")
-    return sequences
+    return sequences, seq_raw
+
 
 
 # ============================================================
@@ -193,6 +199,7 @@ def load_sequences_from_jsonl(path, window_size=14, overlap=1, limit=10000):
 def pad_with_mask(X_list):
     if not X_list:
         raise ValueError("❌ No valid sequences found for padding.")
+    X_list = [np.array(x, dtype="float32") if not isinstance(x, np.ndarray) else x for x in X_list]
     max_len = max(x.shape[0] for x in X_list)
     feat_dim = X_list[0].shape[1]
     X_padded = np.zeros((len(X_list), max_len, feat_dim), dtype="float32")
@@ -240,22 +247,59 @@ def compute_xai_metrics(model, X, recon, latent_vecs, sim_matrix, best_indices, 
 # ============================================================
 # 7️⃣ Main Detection Function
 # ============================================================
+# ============================================================
+# 7️⃣ Main Detection Function
+# ============================================================
+import time  # ⏱️ 추가
+
 def detect_anomalies_with_similarity_XAI(model_path, jsonl_path, pattern_centroids, threshold=None):
-    global CONFIG  # ✅ 전역 CONFIG을 사용하도록 명시
+    global CONFIG
     logger.info(f"🚀 Loading model: {model_path}")
     model = tf.keras.models.load_model(model_path)
 
+    # ------------------------------------------------------------
+    # 🕒 전체 변환 + 추론 시간 측정 시작
+    # ------------------------------------------------------------
+    pipeline_start = time.time()
+
+    # ------------------------
+    # 1️⃣ 데이터 변환 (로드 + Feature 추출 + Padding)
+    # ------------------------
     window_size = get_model_window_size(model)
-    X_list = load_sequences_from_jsonl(
+    X_list, meta_windows = load_sequences_from_jsonl(
         jsonl_path, window_size=window_size, overlap=window_size // 2, limit=CONFIG["limit"]
     )
     X_padded = pad_with_mask(X_list)
 
-    # Reconstruction
+    # ------------------------
+    # 2️⃣ DL 추론 (Reconstruction + Latent Vector)
+    # ------------------------
+    infer_start = time.time()
     mse_scores, recon = reconstruction_error(model, X_padded)
+    latent_vecs = get_latent_vectors(model, X_padded)
+    infer_end = time.time()
 
-    # CONFIG = auto_config_tuning(mse_scores)
+    # ------------------------
+    # 3️⃣ 전체 파이프라인 종료
+    # ------------------------
+    pipeline_end = time.time()
 
+    # ------------------------
+    # ⏱️ 시간 계산
+    # ------------------------
+    total_inference_time = infer_end - infer_start
+    total_pipeline_time = pipeline_end - pipeline_start
+    avg_inference_time = total_inference_time / len(X_padded)
+    avg_pipeline_time = total_pipeline_time / len(X_padded)
+
+    logger.info(f"🧠 Total DL inference time: {total_inference_time:.3f} sec")
+    logger.info(f"⚡ Avg inference time per window: {avg_inference_time:.6f} sec")
+    logger.info(f"🧩 Total pipeline time (load+transform+inference): {total_pipeline_time:.3f} sec")
+    logger.info(f"🚀 Avg pipeline time per window: {avg_pipeline_time:.6f} sec")
+
+    # ------------------------------------------------------------
+    # 4️⃣ 임계값 계산 및 예측
+    # ------------------------------------------------------------
     mean_mse, std_mse = mse_scores.mean(), mse_scores.std()
     if CONFIG["adaptive_threshold"]:
         q1, q3 = np.percentile(mse_scores, [25, 75])
@@ -267,8 +311,9 @@ def detect_anomalies_with_similarity_XAI(model_path, jsonl_path, pattern_centroi
     logger.info(f"📊 mean={mean_mse:.4f}, std={std_mse:.4f}, threshold={threshold:.4f}")
     preds = (mse_scores > threshold).astype(int)
 
-    # Latent Similarity
-    latent_vecs = get_latent_vectors(model, X_padded)
+    # ------------------------------------------------------------
+    # 5️⃣ Latent Similarity + XAI Metric 계산
+    # ------------------------------------------------------------
     pattern_names = list(pattern_centroids.keys())
     pattern_vectors = np.stack(list(pattern_centroids.values()))
     sim_matrix = cosine_similarity(latent_vecs, pattern_vectors)
@@ -280,9 +325,12 @@ def detect_anomalies_with_similarity_XAI(model_path, jsonl_path, pattern_centroi
         model, X_padded, recon, latent_vecs, sim_matrix, best_indices, pattern_centroids
     )
 
-    # 결과 저장
+    # ------------------------------------------------------------
+    # 6️⃣ 결과 저장
+    # ------------------------------------------------------------
     result_path = Path(jsonl_path).with_name("reconstruction_detect_with_XAI.json")
     results = []
+
     for idx, m in enumerate(mse_scores):
         results.append({
             "seq_id": int(idx),
@@ -294,20 +342,34 @@ def detect_anomalies_with_similarity_XAI(model_path, jsonl_path, pattern_centroi
             "similarity_entropy": float(entropy[idx]),
             "feature_error": {feat_names[k]: float(feat_err[idx, k]) for k in range(len(feat_names))},
             "temporal_error_mean": float(np.mean(time_err[idx])),
-            "temporal_error_max": float(np.max(time_err[idx]))
+            "temporal_error_max": float(np.max(time_err[idx])),
+            "window_raw": meta_windows[idx],
         })
 
-    import copy
+    # ------------------------------------------------------------
+    # 7️⃣ 요약 정보 (추론 + 전체 파이프라인 시간)
+    # ------------------------------------------------------------
+    summary_info = {
+        "inference_summary": {
+            "num_windows": len(X_padded),
+            "total_inference_time_sec": round(total_inference_time, 4),
+            "avg_inference_time_per_window_sec": round(avg_inference_time, 6),
+            "total_pipeline_time_sec": round(total_pipeline_time, 4),
+            "avg_pipeline_time_per_window_sec": round(avg_pipeline_time, 6)
+        }
+    }
 
+    import copy
     with open(result_path, "w", encoding="utf-8") as f:
         for r in results:
-            obj = copy.deepcopy(r)
-            f.write(json.dumps(obj, ensure_ascii=False, default=lambda o: float(o)) + "\n")
-
+            f.write(json.dumps(copy.deepcopy(r), ensure_ascii=False, default=lambda o: float(o)) + "\n")
+        f.write(json.dumps(summary_info, ensure_ascii=False) + "\n")
 
     logger.success(f"✅ XAI Detection done → {result_path.resolve()}")
     logger.info(f"📈 Avg similarity={np.mean(best_scores):.2f}%, Avg entropy={np.mean(entropy):.4f}")
+    logger.info(f"🧾 Inference Summary → {summary_info}")
     return results
+
 
 
 # ============================================================
@@ -369,6 +431,7 @@ def generate_SLM_input(results, save_path):
                 "temporal_error_max": r["temporal_error_max"],
                 "context": context
             },
+            "window_raw": r.get("window_raw", []),
             "prompt": (
                 "이 시퀀스는 의미적으로 어떤 이상을 나타내는가? "
                 "정상 패턴과 비교하여 어떤 필드가 변형되었는지 설명하고, "
@@ -389,7 +452,7 @@ def generate_SLM_input(results, save_path):
 # ============================================================
 if __name__ == "__main__":
     MODEL_PATH = "outputs/models/LSTM_AE_Flexible_v2.keras"
-    JSONL_PATH = "dataset/PLS-JSONL/1107_all_patterns_labeld_clustered/1107_all_patterns_labeld_clustered_merged.jsonl"
+    JSONL_PATH = "dataset/PLS-JSONL/merged.jsonl"
     pattern_centroids = np.load("outputs/pattern_centroids.npy", allow_pickle=True).item()
 
     results = detect_anomalies_with_similarity_XAI(
@@ -428,6 +491,7 @@ if __name__ == "__main__":
     "context": "이 시퀀스는 P_0002 패턴에 속하지만 addr 필드에서 높은 복원 오차(174670.531)가 발생했습니다. ..."
               # SLM이 생성한 자연어 설명: 어떤 필드에서 오차가 컸는지, 의미론적 안정성 수준 설명
   },
+  "window_raw": 원본 패킷에 관한 json 데이터
   "prompt": "이 시퀀스는 의미적으로 어떤 이상을 나타내는가? ..."  
             # LLM(XAI) 질의 프롬프트: SLM이 DL의 결과를 바탕으로 해석적 설명을 생성하도록 유도
 }
