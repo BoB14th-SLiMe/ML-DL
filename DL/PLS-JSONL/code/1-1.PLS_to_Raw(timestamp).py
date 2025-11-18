@@ -145,5 +145,5 @@ if __name__ == "__main__":
     PLS_to_Raw(config)
 
 """
-usage: python "1-1.PLS_to_Raw(timestamp).py" -c "../config/PLS_to_Raw(timestamp).yaml"
+usage: python "1-1.PLS_to_Raw(timestamp).py" -c "../config/1.PLS_to_Raw.yaml"
 """
