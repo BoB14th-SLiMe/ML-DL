@@ -1,0 +1,7 @@
+pipeline:
+  PLS_file: "../data/PLS.jsonl"
+  RAW_file: "../data/RAW.jsonl"
+  1-1_result_file: "../result/1-1_PLS_to_Raw_result.jsonl"
+  1-2_result_file: "../result/1-2_PLS_to_Raw_result.jsonl"
+  1-1_log_file: "../log/1-1.log"
+  1-2_log_file: "../log/1-2.log"
