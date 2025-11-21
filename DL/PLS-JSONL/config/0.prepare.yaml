@@ -1,6 +1,0 @@
-pipeline:
-  PLS_file: "../data/PLS.jsonl"
-  RAW_file: "../data/RAW.jsonl"
-
-  result_dir: "../result/"
-  prepare_log: "../logs/0.prepare.log"
