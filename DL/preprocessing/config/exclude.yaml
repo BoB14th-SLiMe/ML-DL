@@ -1,0 +1,39 @@
+common_ex:
+  - "@timestamp"
+  - "sq"
+  - "ak"
+  - "fl"
+  - "protocol"
+  - "src_asset"
+  - "dst_asset"
+
+s7comm_ex:
+
+xgt_fen_ex:
+  - "xgt_fen.prid"
+  - "xgt_fen.companyId"
+  - "xgt_fen.plcinfo"
+  - "xgt_fen.cpuinfo"
+  - "xgt_fen.len"
+  - "xgt_fen.errstat"
+  - "xgt_fen.vars"
+  - "xgt_fen.translated_addr"
+  - "xgt_fen.description"
+
+modbus_ex:
+  - "modbus.tid"
+  - "modbus.translated_addr"
+  - "modbus.description"
+  - "modbus.val"
+  
+dns_ex:
+  - "dns.tid"
+  - "dns.fl"
+
+arp_ex:
+
+tcp_ex:
+
+unknown_ex:
+
+udp_ex:
