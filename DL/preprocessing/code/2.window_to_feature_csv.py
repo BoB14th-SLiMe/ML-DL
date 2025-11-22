@@ -621,5 +621,4 @@ if __name__ == "__main__":
 """
 python 2.window_to_feature_csv.py --input "../data/pattern_windows.jsonl" --pre_dir "../result" --output "../result/pattern_features.csv"    
 
-
 """

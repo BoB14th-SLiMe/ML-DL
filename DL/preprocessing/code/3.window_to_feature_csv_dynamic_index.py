@@ -784,8 +784,6 @@ if __name__ == "__main__":
     main()
 
 """
-python 3.window_to_feature_csv_dynamic_index.py --input "../data/pattern_windows.jsonl"  --pre_dir "../result" --output "../result/pattern_features.csv"
-
-python 3.window_to_feature_csv_dynamic_index.py --input "../data/pattern_windows.jsonl" --pre_dir "../result" --output "../result/pattern_features.csv" --max-index 8
+python 3.window_to_feature_csv_dynamic_index.py --input "../data/pattern_windows.jsonl" --pre_dir "../result" --output "../../train/data/pattern_features.csv" --max-index 8
 
 """

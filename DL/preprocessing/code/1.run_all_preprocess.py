@@ -154,10 +154,6 @@ if __name__ == "__main__":
     main()
 
 """
-# 학습 데이터 생성 (모두)
-python 1.run_all_preprocess.py --input "../data/ML_DL 학습.jsonl" --output "../result" --mode fit
-
-# 학습 데이터 생성 (일부 데이터 제외)
 python 2.run_all_preprocess.py --input "../data/ML_DL 학습.jsonl" --output "../result" --mode fit --skip dns.py modbus.py
 
 """
