@@ -106,16 +106,16 @@ def fit_preprocess(input_path: Path, out_dir: Path):
     }
 
     # JSON 저장
-    (out_dir / "host_map.json").write_text(
+    (out_dir / "common_host_map.json").write_text(
         json.dumps(host_map, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    (out_dir / "norm_params.json").write_text(
+    (out_dir / "common_norm_params.json").write_text(
         json.dumps(norm_params, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
     print("✅ FIT 완료")
-    print(f"- host_map.json 저장: {out_dir/'host_map.json'}")
-    print(f"- norm_params.json 저장: {out_dir/'norm_params.json'}")
+    print(f"- host_map.json 저장: {out_dir/'common_host_map.json'}")
+    print(f"- norm_params.json 저장: {out_dir/'common_norm_params.json'}")
 
     # numpy 구조화 배열 생성 (int + float 같이 저장)
     dtype = np.dtype([
@@ -164,8 +164,8 @@ def fit_preprocess(input_path: Path, out_dir: Path):
 # ---------------------------------------------
 def transform_preprocess(input_path: Path, out_dir: Path):
 
-    host_map = json.loads((out_dir / "host_map.json").read_text(encoding="utf-8"))
-    norm_params = json.loads((out_dir / "norm_params.json").read_text(encoding="utf-8"))
+    host_map = json.loads((out_dir / "common_host_map.json").read_text(encoding="utf-8"))
+    norm_params = json.loads((out_dir / "common_norm_params.json").read_text(encoding="utf-8"))
 
     get_host_id = get_host_id_factory(host_map)
 
@@ -270,6 +270,6 @@ if __name__ == "__main__":
 
 """
 usage:
-    python preprocess.py --fit -i train.jsonl -o output_dir
-    python preprocess.py --transform -i new.jsonl -o output_dir
+    python common.py --fit -i "../data/ML_DL 학습.jsonl" -o "../result/output_common"
+    python common.py --transform -i new.jsonl -o output_dir
 """
