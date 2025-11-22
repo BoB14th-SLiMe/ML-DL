@@ -42,8 +42,9 @@ import random
 import numpy as np
 from tensorflow.keras.callbacks import EarlyStopping
 
+
 # -------------------------------------------------------
-# 데이터 로더 (원본과 동일)
+# 공통 유틸
 # -------------------------------------------------------
 def compute_window_errors(X_true: np.ndarray,
                           X_pred: np.ndarray,
@@ -77,11 +78,20 @@ def set_global_seed(seed: int):
     import tensorflow as tf
     tf.random.set_seed(seed)
 
+
+# -------------------------------------------------------
+# JSONL → (N, T, D) 변환 + feature 선택
+# -------------------------------------------------------
 def load_windows_to_array(
     jsonl_path: Path,
+    exclude_features: List[str] | None = None,
 ) -> Tuple[np.ndarray, List[str], List[int], List[str]]:
     """
     JSONL 파일 → (N, T, D) numpy array로 변환
+
+    exclude_features:
+      - 학습에서 제외할 feature 이름 리스트
+      - seq[0].keys() 중 해당 이름이 있으면 제거
 
     반환:
       X           : shape (N, T, D), float32
@@ -94,6 +104,8 @@ def load_windows_to_array(
     patterns: List[str] = []
 
     feature_keys: List[str] = []
+
+    exclude_set = set(exclude_features) if exclude_features else set()
 
     with jsonl_path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -108,8 +120,24 @@ def load_windows_to_array(
 
             # feature_keys를 첫 window에서 한 번만 결정
             if not feature_keys:
-                # 정렬해서 고정된 순서 사용 (원본과 동일)
-                feature_keys = sorted(list(seq[0].keys()))
+                all_keys = sorted(list(seq[0].keys()))
+
+                if exclude_set:
+                    actually_excluded = sorted(set(all_keys) & exclude_set)
+                    if actually_excluded:
+                        print(f"[INFO] load_windows_to_array: 실제로 제외되는 feature = {actually_excluded}")
+                    not_found = sorted(exclude_set - set(all_keys))
+                    if not_found:
+                        print(f"[WARN] load_windows_to_array: JSONL에 존재하지 않는 feature (무시됨) = {not_found}")
+
+                    feature_keys = [k for k in all_keys if k not in exclude_set]
+                    if not feature_keys:
+                        raise RuntimeError("❌ 모든 feature가 exclude되어 남는 feature가 없습니다.")
+                else:
+                    feature_keys = all_keys
+
+                print(f"[INFO] 최종 사용 feature 수 = {len(feature_keys)}")
+                print(f"[INFO] 예시 feature 목록 (앞 10개): {feature_keys[:10]}")
 
             T = len(seq)
             D = len(feature_keys)
@@ -211,6 +239,27 @@ def main():
         default=42,
         help="랜덤 시드 (default: 42)",
     )
+    # 🔥 기존: CLI에서 직접 feature 나열
+    parser.add_argument(
+        "--exclude-features",
+        nargs="+",
+        default=None,
+        help=(
+            "학습에서 제외할 feature 이름 리스트 (공백으로 구분). "
+            "예: --exclude-features protocol delta_t modbus_regs_val_std"
+        ),
+    )
+    # 🔥 추가: TXT 파일로 feature 제외 리스트 관리
+    parser.add_argument(
+        "--exclude-file",
+        type=str,
+        default=None,
+        help=(
+            "학습에서 제외할 feature 이름을 줄 단위로 적어둔 txt 파일 경로. "
+            "빈 줄 / #으로 시작하는 줄은 무시됨. "
+            "예: --exclude-file ../config/exclude_features.txt"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -228,12 +277,47 @@ def main():
     print(f"[INFO] TensorFlow version: {tf.__version__}")
     print(f"[INFO] device flag = {args.device} (실제 사용 디바이스는 TensorFlow가 자동 선택)")
 
+    # -----------------------------
+    # 제외 feature 리스트 구성 (CLI + TXT 합치기)
+    # -----------------------------
+    exclude_from_cli: List[str] = args.exclude_features or []
+    exclude_from_file: List[str] = []
+
+    if args.exclude_file:
+        excl_path = Path(args.exclude_file)
+        if not excl_path.exists():
+            print(f"[WARN] exclude-file 경로에 파일이 없습니다: {excl_path}")
+        else:
+            print(f"[INFO] exclude-file 로드: {excl_path}")
+            with excl_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    name = line.strip()
+                    if not name:
+                        continue
+                    if name.startswith("#"):
+                        continue
+                    exclude_from_file.append(name)
+
+    # 두 리스트 합치고 순서 유지하면서 중복 제거
+    merged_exclude: List[str] = []
+    for name in exclude_from_cli + exclude_from_file:
+        if name not in merged_exclude:
+            merged_exclude.append(name)
+
+    if merged_exclude:
+        print(f"[INFO] 최종 제외 feature 목록 = {merged_exclude}")
+    else:
+        print("[INFO] 제외할 feature 없음 (전체 feature 사용)")
+
     # 1) 데이터 로드
     print(f"[INFO] JSONL 로드: {input_path}")
-    X, feature_keys, window_ids, patterns = load_windows_to_array(input_path)
+    X, feature_keys, window_ids, patterns = load_windows_to_array(
+        input_path,
+        exclude_features=merged_exclude,
+    )
     N, T, D = X.shape
     print(f"[INFO] 데이터 shape: N={N}, T={T}, D={D}")
-    print(f"[INFO] feature 수: {len(feature_keys)}")
+    print(f"[INFO] 최종 feature 수: {len(feature_keys)}")
 
     # feature key 순서 저장
     feat_path = output_dir / "feature_keys.txt"
@@ -325,8 +409,6 @@ def main():
     optimizer = optimizers.Adam(learning_rate=args.lr)
     model.compile(optimizer=optimizer, loss=loss_fn)
 
-
-
     # 5) 학습
     es = EarlyStopping(
         monitor="val_loss",
@@ -413,6 +495,7 @@ def main():
         "device_flag": args.device,
         "framework": "tensorflow.keras",
         "seed": args.seed,
+        "exclude_features": merged_exclude,
     }
     config_path = output_dir / "config.json"
     with config_path.open("w", encoding="utf-8") as f:
@@ -424,7 +507,7 @@ def main():
         json.dump(history, f, indent=2, ensure_ascii=False)
     print(f"[INFO] train_log 저장 → {log_path}")
 
-    # 7) loss / val_loss 곡선 그림 저장
+    # 8) loss / val_loss 곡선 그림 저장
     try:
         epochs_range = range(1, len(history["train_loss"]) + 1)
 
@@ -446,12 +529,11 @@ def main():
         print(f"[WARN] loss 그래프 저장 중 오류 발생: {e}")
 
 
-
 if __name__ == "__main__":
     main()
 
 
 """
-python LSTM_AE.py -i "../result/pattern_features_padded_0.jsonl" -o "../result/LSTM_AE" --epochs 100 --batch_size 128 --hidden_dim 128 --latent_dim 64 --pad_value 0.0 --device cuda --seed 42
+python 2.LSTM_AE.py -i "../result/pattern_features_padded_0.jsonl" -o "../../result_train/data" --epochs 400 --batch_size 64 --hidden_dim 64 --latent_dim 64 --pad_value 0.0 --device cuda --seed 42 --exclude-file "../data/exclude.txt"
 
 """

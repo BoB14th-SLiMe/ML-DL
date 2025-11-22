@@ -143,9 +143,14 @@ def main():
     feature_keys = list(pad_template.keys())
     print(f"[INFO] feature key 수 (pad 대상): {len(feature_keys)}")
 
-    # 4) 각 window에 대해 index 기반 padding 적용
-    printed_example = False  # 첫 번째 결과만 출력하기 위한 플래그
+    # ★★★ feature 목록을 result(=output 디렉토리)에 저장 ★★★
+    feature_list_path = output_path.parent / "feature_keys.txt"
+    with feature_list_path.open("w", encoding="utf-8") as f_feat:
+        for k in feature_keys:
+            f_feat.write(k + "\n")
+    print(f"[INFO] feature_keys.txt 저장 → {feature_list_path}")
 
+    # 4) 각 window에 대해 index 기반 padding 적용
     with output_path.open("w", encoding="utf-8") as fout:
         for win in windows:
             window_id = win.get("window_id")
@@ -190,12 +195,6 @@ def main():
             }
             fout.write(json.dumps(out_obj, ensure_ascii=False) + "\n")
 
-            # 첫 번째 window 하나만 예시로 출력
-            # if not printed_example:
-            #     print("===== 첫 번째 padded window 예시 =====")
-            #     print(json.dumps(out_obj, indent=2, ensure_ascii=False))
-            #     printed_example = True
-
     print(f"[INFO] padding 적용 완료 → {output_path}")
 
 
@@ -203,13 +202,9 @@ if __name__ == "__main__":
     main()
 
 """
-# 0-padding
-python 1.padding.py -i "../data/pattern_features.jsonl" -o "../result/pattern_features_padded_0.jsonl" --pad_value 0 --window_size 80
-
-# -1-padding
-python 1.padding.py -i "../data/pattern_features.jsonl" -o "../result/pattern_features_padded_-1.jsonl" --pad_value -1 --window_size 80
+# drop key
+python 1.padding.py -i "../data/pattern_features.jsonl" -o "../result/pattern_features_padded_0.jsonl" --pad_value 0 --window_size 76 --drop_keys deltat
 
 # drop key
-python 1.padding.py -i "../data/pattern_features.jsonl" -o "../result/pattern_features_padded_0.jsonl" --pad_value 0 --window_size 80 --drop_keys deltat
-
+python 1.padding.py -i "../data/pattern_features.jsonl" -o "../result/pattern_features_padded_-1.jsonl" --pad_value 0 --window_size 76 --drop_keys deltat
 """
