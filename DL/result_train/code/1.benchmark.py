@@ -372,11 +372,43 @@ def main():
 
         model, config, threshold_from_file = load_model_from_dir(model_dir)
 
-        # config와 현재 데이터 shape consistency 체크
+        # === 변경된 부분: feature_keys.txt 기준으로 입력 feature 재정렬/축소 ===
+        N_raw, T_raw, D_raw = X_windows.shape
+        print(f"[INFO] 원본 X_windows shape: (N={N_raw}, T={T_raw}, D={D_raw})")
+
+        X_model = X_windows  # 기본은 전체 feature 사용
+        feat_indices = None
+
+        feat_keys_path = model_dir / "feature_keys.txt"
+        if feat_keys_path.exists():
+            try:
+                with feat_keys_path.open("r", encoding="utf-8") as f:
+                    feature_keys = [line.strip() for line in f if line.strip()]
+                print(f"[INFO] feature_keys.txt 로드, 길이={len(feature_keys)}")
+
+                feat_indices = []
+                for k in feature_keys:
+                    if k in PACKET_FEATURE_COLUMNS:
+                        feat_indices.append(PACKET_FEATURE_COLUMNS.index(k))
+                    else:
+                        print(f"[WARN] feature_keys.txt에 있는 '{k}'가 PACKET_FEATURE_COLUMNS에 없습니다.")
+
+                if feat_indices:
+                    X_model = X_windows[:, :, feat_indices]
+                    print(f"[INFO] 모델 입력에 사용할 feature_dim = {X_model.shape[2]} "
+                          "(feature_keys.txt 기준)")
+                else:
+                    print("[WARN] feature_keys 기반 인덱스를 만들지 못했습니다. 전체 feature를 그대로 사용합니다.")
+            except Exception as e:
+                print(f"[WARN] feature_keys.txt 처리 중 오류: {e} → 전체 feature 사용")
+        else:
+            print("[INFO] feature_keys.txt 없음 → PACKET_FEATURE_COLUMNS 전체 사용")
+
+        # config와 현재 (모델 입력용) 데이터 shape consistency 체크
         T_cfg = config.get("T")
         D_cfg = config.get("D")
         pad_value = float(config.get("pad_value", 0.0))
-        _, T_cur, D_cur = X_windows.shape
+        _, T_cur, D_cur = X_model.shape
 
         if T_cfg is not None and T_cfg != T_cur:
             print(f"[WARN] config.T({T_cfg}) != 현재 window_size({T_cur})")
@@ -405,22 +437,20 @@ def main():
             pass
 
         print("[INFO] DL 모델로 윈도우별 reconstruction 예측 중...")
-        recon = model.predict(X_windows, batch_size=args.batch_size, verbose=1)
+        # 🔥 이제는 X_model (subset된 feature) 로 예측
+        recon = model.predict(X_model, batch_size=args.batch_size, verbose=1)
 
-        if recon.shape != X_windows.shape:
-            print(f"[WARN] 재구성 결과 shape {recon.shape} != 입력 shape {X_windows.shape}")
+        if recon.shape != X_model.shape:
+            print(f"[WARN] 재구성 결과 shape {recon.shape} != 입력 shape {X_model.shape}")
             print("       브로드캐스트 가능한지 확인 후 MSE 계산을 진행합니다.")
 
         # 🔥 train 코드와 동일한 방식으로 윈도우별 MSE 계산 (pad_value 마스킹)
-        # -------------------------
-        # 윈도우별 MSE 계산 (학습 코드와 동일한 방식, pad mask 적용)
-        # -------------------------
         pad_value = float(config.get("pad_value", 0.0))
 
-        diff = X_windows - recon  # (N, T, D)
+        diff = X_model - recon  # (N, T, D)
 
         # 각 timestep이 pad인지 아닌지: feature 중 하나라도 pad_value가 아니면 유효
-        not_pad = np.any(np.not_equal(X_windows, pad_value), axis=-1)  # (N, T)
+        not_pad = np.any(np.not_equal(X_model, pad_value), axis=-1)  # (N, T)
         mask = not_pad.astype(np.float32)  # (N, T)
 
         # timestep별 MSE
@@ -475,18 +505,17 @@ def main():
 if __name__ == "__main__":
     main()
 
-
 """
 실행 예시:
 
 # 1) non-overlap 윈도우 + feature만 만들고 싶을 때
-python 1.benchmark.py --input "../data/attack.jsonl" --pre-dir "../../preprocessing/result" --window-size 80 --output-dir "../result/benchmark"
+python 1.benchmark.py --input "../data/attack.jsonl" --pre-dir "../../preprocessing/result" --window-size 76 --output-dir "../result/benchmark"
 
 # 2) 슬라이딩 윈도우 (size=80, step=40) + LSTM-AE 탐지까지 수행할 때
-python 1.benchmark.py --input "../data/attack.jsonl" --pre-dir "../../preprocessing/result" --window-size 80 --step-size 30 --output-dir "../result/benchmark" --model-dir "../data" --batch-size 128
+python 1.benchmark.py --input "../data/attack.jsonl" --pre-dir "../../preprocessing/result" --window-size 41 --step-size 20 --output-dir "../result/benchmark" --model-dir "../data" --batch-size 128
 
-python 1.benchmark.py --input "../data/attack.jsonl" --pre-dir "../../preprocessing/result" --window-size 80 --step-size 30 --output-dir "../result/benchmark" --model-dir "../data" --batch-size 128 --threshold 100
+# 3) 슬라이딩 윈도우 (size=80, step=40) + LSTM-AE 탐지까지 수행할 때 threshold 지정
+python 1.benchmark.py --input "../data/attack.jsonl" --pre-dir "../../preprocessing/result" --window-size 8 --step-size 4 --output-dir "../result/benchmark" --model-dir "../data" --batch-size 128 --threshold 100
 
-# threshold.json 안에 threshold_p99 / threshold_mu3가 있으면 자동으로 사용,
-# CLI에서 --threshold 300 같이 주면 그 값이 우선 사용됨.
+
 """

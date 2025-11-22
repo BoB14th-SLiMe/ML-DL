@@ -163,6 +163,7 @@ if __name__ == "__main__":
     main()
 
 """
-python 0.attack_result.py --input "../data/attack.jsonl" --window-size 80 --step-size 30 --output "../result/attack_result.csv"
+python 0.attack_result.py --input "../data/attack.jsonl" --window-size 8 --step-size 4 --output "../result/attack_result.csv"
+
 
 """
