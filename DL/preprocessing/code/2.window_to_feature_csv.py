@@ -1,0 +1,625 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+window_to_feature_csv.py
+
+패턴 윈도우 JSONL (window_id, pattern, sequence_group 포함) → 
+기존 전처리 파라미터(common / s7comm / modbus / xgt_fen / arp / dns)를 사용해서
+통합 feature CSV + JSONL 로 변환.
+
+- 없는 / 해당되지 않는 feature는 0으로 채움
+- min-max 정규화는 이미 학습 데이터로 만든 norm_params.json들을 그대로 사용
+
+출력:
+  1) CSV  : 패킷 단위 row (window_id, pattern, index, packet_idx, protocol, delta_t, ... feature)
+  2) JSONL: window 단위 line
+        {
+          "window_id": ...,
+          "pattern": ...,
+          "index": [...],
+          "sequence_group": [
+             {  # 패킷별 feature
+               "index": ...,
+               "packet_idx": ...,
+               "protocol": ...,
+               "delta_t": ...,
+               ...
+             },
+             ...
+          ]
+        }
+"""
+
+import json
+import argparse
+import csv
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+# ==========================
+# 공통 유틸
+# ==========================
+PROTOCOL_MAP = {
+    "s7comm": 1,
+    "tcp": 2,
+    "xgt_fen": 3,
+    "modbus": 4,
+    "arp": 5,
+    "udp": 6,
+    "unknown": 7,
+    "dns": 8,
+}
+
+def protocol_to_code(p: str) -> int:
+    if not p:
+        return 0
+    return PROTOCOL_MAP.get(p, 0)
+
+def load_json(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"❌ 필요 파일 없음: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+def minmax_norm(x: float, vmin: float, vmax: float) -> float:
+    if vmax <= vmin:
+        return 0.0
+    return (x - vmin) / (vmax - vmin + 1e-9)
+
+def safe_int(val: Any, default: int = 0) -> int:
+    try:
+        if isinstance(val, list) and val:
+            val = val[0]
+        return int(val)
+    except Exception:
+        return default
+
+def safe_float(val: Any, default: float = 0.0) -> float:
+    try:
+        if isinstance(val, list) and val:
+            val = val[0]
+        return float(val)
+    except Exception:
+        return default
+
+# ==========================
+# common host embed (smac/sip, dmac/dip)
+# ==========================
+
+def get_host_id_factory(host_map: Dict[str, int]):
+    next_id = max(host_map.values()) + 1 if host_map else 1
+
+    def get_host_id(mac: Any, ip: Any) -> int:
+        nonlocal next_id
+        if not mac or not ip:
+            return 0  # UNK
+        key = f"{mac}|{ip}"
+        if key not in host_map:
+            # 새 host도 일단 ID 부여 (파일에는 다시 안 저장)
+            host_map[key] = next_id
+            next_id += 1
+        return host_map[key]
+
+    return get_host_id
+
+def build_common_features(
+    obj: Dict[str, Any],
+    host_map: Dict[str, int],
+    norm_params: Dict[str, Any]
+) -> Dict[str, float]:
+    get_host_id = get_host_id_factory(host_map)
+
+    smac = obj.get("smac")
+    sip  = obj.get("sip")
+    dmac = obj.get("dmac")
+    dip  = obj.get("dip")
+    sp   = safe_int(obj.get("sp"))
+    dp   = safe_int(obj.get("dp"))
+    length = safe_int(obj.get("len"))
+    dir_raw = obj.get("dir")
+
+    src_id = get_host_id(smac, sip)
+    dst_id = get_host_id(dmac, dip)
+
+    dir_code = 1.0 if dir_raw == "request" else 0.0
+
+    sp_min = norm_params["sp_min"]
+    sp_max = norm_params["sp_max"]
+    dp_min = norm_params["dp_min"]
+    dp_max = norm_params["dp_max"]
+    len_min = norm_params["len_min"]
+    len_max = norm_params["len_max"]
+
+    sp_norm  = minmax_norm(float(sp),  sp_min,  sp_max)
+    dp_norm  = minmax_norm(float(dp),  dp_min,  dp_max)
+    len_norm = minmax_norm(float(length), len_min, len_max)
+
+    return {
+        "src_host_id": float(src_id),
+        "dst_host_id": float(dst_id),
+        "sp_norm":     float(sp_norm),
+        "dp_norm":     float(dp_norm),
+        "dir_code":    float(dir_code),
+        "len_norm":    float(len_norm),
+    }
+
+# ==========================
+# s7comm feature
+# ==========================
+
+def build_s7comm_features(
+    obj: Dict[str, Any],
+    norm_params: Dict[str, Any]
+) -> Dict[str, float]:
+    # raw 값 파싱
+    ros = safe_int(obj.get("s7comm.ros"))
+    fn  = safe_int(obj.get("s7comm.fn"))
+    db  = safe_int(obj.get("s7comm.db"))
+    addr = safe_int(obj.get("s7comm.addr"))
+
+    # 저장된 구조에 맞게 읽기
+    ros_cfg  = norm_params.get("s7comm.ros", {})
+    db_cfg   = norm_params.get("s7comm.db", {})
+    addr_cfg = norm_params.get("s7comm.addr", {})
+
+    ros_min  = ros_cfg.get("min")
+    ros_max  = ros_cfg.get("max")
+    db_min   = db_cfg.get("min")
+    db_max   = db_cfg.get("max")
+    addr_min = addr_cfg.get("min")
+    addr_max = addr_cfg.get("max")
+
+    ros_norm  = minmax_norm(float(ros),  ros_min,  ros_max)
+    db_norm   = minmax_norm(float(db),   db_min,   db_max)
+    addr_norm = minmax_norm(float(addr), addr_min, addr_max)
+
+    return {
+        "s7comm_ros_norm": float(ros_norm),
+        "s7comm_fn":       float(fn),
+        "s7comm_db_norm":  float(db_norm),
+        "s7comm_addr_norm": float(addr_norm),
+    }
+
+# ==========================
+# modbus feature
+# ==========================
+
+def _parse_int_list(val: Any) -> List[int]:
+    if isinstance(val, list):
+        out = []
+        for v in val:
+            try:
+                out.append(int(v))
+            except Exception:
+                continue
+        return out
+    # 문자열 "[1,2]" 같은건 여기서는 안 다룸 (이미 json에서 리스트로 나올 거라고 가정)
+    return []
+
+def _compute_regs_addr_stats(addrs: List[int]) -> Tuple[int, float, float, float]:
+    if not addrs:
+        return 0, 0.0, 0.0, 0.0
+    c = len(addrs)
+    amin = float(min(addrs))
+    amax = float(max(addrs))
+    return c, amin, amax, amax - amin
+
+def _compute_regs_val_stats(vals: List[int]) -> Tuple[float, float, float, float]:
+    if not vals:
+        return 0.0, 0.0, 0.0, 0.0
+    vmin = float(min(vals))
+    vmax = float(max(vals))
+    mean = float(sum(vals)) / len(vals)
+    var = sum((v - mean) ** 2 for v in vals) / len(vals)
+    std = var ** 0.5
+    return vmin, vmax, mean, std
+
+def build_modbus_features(
+    obj: Dict[str, Any],
+    norm_params: Dict[str, Any]
+) -> Dict[str, float]:
+    addr = safe_int(obj.get("modbus.addr"))
+    fc   = safe_int(obj.get("modbus.fc"))
+    qty  = safe_int(obj.get("modbus.qty"))
+    bc   = safe_int(obj.get("modbus.bc"))
+
+    regs_addr = obj.get("modbus.regs.addr")
+    regs_val  = obj.get("modbus.regs.val")
+
+    # nested 구조에 맞게 읽기
+    addr_cfg = norm_params.get("modbus.addr", {})
+    fc_cfg   = norm_params.get("modbus.fc", {})
+    qty_cfg  = norm_params.get("modbus.qty", {})
+    bc_cfg   = norm_params.get("modbus.bc", {})
+
+    addr_min = addr_cfg.get("min")
+    addr_max = addr_cfg.get("max")
+    fc_min   = fc_cfg.get("min")
+    fc_max   = fc_cfg.get("max")
+    qty_min  = qty_cfg.get("min")
+    qty_max  = qty_cfg.get("max")
+    bc_min   = bc_cfg.get("min")
+    bc_max   = bc_cfg.get("max")
+
+    addr_norm = minmax_norm(float(addr), addr_min, addr_max)
+    fc_norm   = minmax_norm(float(fc),   fc_min,   fc_max)
+    qty_norm  = minmax_norm(float(qty),  qty_min,  qty_max)
+    bc_norm   = minmax_norm(float(bc),   bc_min,   bc_max)
+
+    addrs = _parse_int_list(regs_addr)
+    vals  = _parse_int_list(regs_val)
+
+    c, amin, amax, arange = _compute_regs_addr_stats(addrs)
+    vmin, vmax, vmean, vstd = _compute_regs_val_stats(vals)
+
+    return {
+        "modbus_addr_norm":       float(addr_norm),
+        "modbus_fc_norm":         float(fc_norm),
+        "modbus_qty_norm":        float(qty_norm),
+        "modbus_bc_norm":         float(bc_norm),
+        "modbus_regs_count":      float(c),
+        "modbus_regs_addr_min":   float(amin),
+        "modbus_regs_addr_max":   float(amax),
+        "modbus_regs_addr_range": float(arange),
+        "modbus_regs_val_min":    float(vmin),
+        "modbus_regs_val_max":    float(vmax),
+        "modbus_regs_val_mean":   float(vmean),
+        "modbus_regs_val_std":    float(vstd),
+    }
+
+# ==========================
+# xgt_fen feature
+# ==========================
+
+def get_var_id_factory(var_map: Dict[str, int]):
+    next_id = max(var_map.values()) + 1 if var_map else 1
+
+    def get_var_id(var: Any) -> int:
+        nonlocal next_id
+        if not var:
+            return 0
+        if not isinstance(var, str):
+            var_str = str(var)
+        else:
+            var_str = var
+        if var_str not in var_map:
+            var_map[var_str] = next_id
+            next_id += 1
+        return var_map[var_str]
+
+    return get_var_id
+
+def _decode_data_hex(hex_str: str) -> List[int]:
+    # "05001e00..." → [0x05, 0x00, 0x1e, ...]
+    try:
+        bs = bytes.fromhex(hex_str)
+    except Exception:
+        return []
+    return list(bs)
+
+def _bucket_by_mean(mean_byte: float) -> int:
+    # 0~255를 4구간 정도로 나눈다고 가정
+    if mean_byte <= 64:
+        return 0
+    elif mean_byte <= 128:
+        return 1
+    elif mean_byte <= 192:
+        return 2
+    else:
+        return 3
+
+def build_xgt_fen_features(
+    obj: Dict[str, Any],
+    var_map: Dict[str, int],
+    norm_params: Dict[str, Any]
+) -> Dict[str, float]:
+    feat: Dict[str, float] = {}
+
+    # 기본 필드
+    source = safe_int(obj.get("xgt_fen.source"))
+    datasize = safe_int(obj.get("xgt_fen.datasize"))
+    cmd = safe_int(obj.get("xgt_fen.cmd"))
+    dtype = safe_int(obj.get("xgt_fen.dtype"))
+    blkcnt = safe_int(obj.get("xgt_fen.blkcnt"))
+    errstat = safe_int(obj.get("xgt_fen.errstat"))
+    errinfo = safe_int(obj.get("xgt_fen.errinfo"))
+    fenetpos = safe_int(obj.get("xgt_fen.fenetpos"))
+
+    xgt_fenet_base = fenetpos >> 4
+    xgt_fenet_slot = fenetpos & 0x0F
+
+    # VAR 이름(예: "%DB001046")
+    var_raw = obj.get("xgt_fen.vars")
+    get_var_id = get_var_id_factory(var_map)
+    var_id = get_var_id(var_raw)
+    var_cnt = 1.0 if var_raw else 0.0
+
+    # data hex 처리
+    data_raw = obj.get("xgt_fen.data")
+    data_missing = 1.0 if data_raw is None else 0.0
+    data_len_chars = float(len(data_raw)) if isinstance(data_raw, str) else 0.0
+    num_spaces = float(data_raw.count(" ")) if isinstance(data_raw, str) else 0.0
+
+    is_hex = 0.0
+    bytes_list: List[int] = []
+    if isinstance(data_raw, str):
+        hex_str = data_raw.replace(" ", "")
+        try:
+            bs = bytes.fromhex(hex_str)
+            is_hex = 1.0
+            bytes_list = list(bs)
+        except Exception:
+            is_hex = 0.0
+
+    n_bytes = float(len(bytes_list))
+    zero_ratio = 0.0
+    first_b = 0.0
+    last_b = 0.0
+    mean_b = 0.0
+    bucket = 0.0
+
+    if bytes_list:
+        first_b = float(bytes_list[0])
+        last_b = float(bytes_list[-1])
+        mean_b = float(sum(bytes_list)) / len(bytes_list)
+        zero_cnt = sum(1 for b in bytes_list if b == 0)
+        zero_ratio = float(zero_cnt) / len(bytes_list)
+        bucket = float(_bucket_by_mean(mean_b))
+
+    feat["xgt_var_id"] = float(var_id)
+    feat["xgt_var_cnt"] = float(var_cnt)
+    feat["xgt_source"] = float(source)
+    feat["xgt_fenet_base"] = float(xgt_fenet_base)
+    feat["xgt_fenet_slot"] = float(xgt_fenet_slot)
+    feat["xgt_cmd"] = float(cmd)
+    feat["xgt_dtype"] = float(dtype)
+    feat["xgt_blkcnt"] = float(blkcnt)
+    feat["xgt_err_flag"] = 1.0 if (errstat != 0 or errinfo != 0) else 0.0
+    feat["xgt_err_code"] = float(errinfo)
+    feat["xgt_datasize"] = float(datasize)
+    feat["xgt_data_missing"] = float(data_missing)
+    feat["xgt_data_len_chars"] = float(data_len_chars)
+    feat["xgt_data_num_spaces"] = float(num_spaces)
+    feat["xgt_data_is_hex"] = float(is_hex)
+    feat["xgt_data_n_bytes"] = float(n_bytes)
+    feat["xgt_data_zero_ratio"] = float(zero_ratio)
+    feat["xgt_data_first_byte"] = float(first_b)
+    feat["xgt_data_last_byte"] = float(last_b)
+    feat["xgt_data_mean_byte"] = float(mean_b)
+    feat["xgt_data_bucket"] = float(bucket)
+
+    return feat
+
+# ==========================
+# arp feature
+# ==========================
+
+def build_arp_features(
+    obj: Dict[str, Any],
+    host_map: Dict[str, int]
+) -> Dict[str, float]:
+    get_host_id = get_host_id_factory(host_map)
+
+    smac = obj.get("smac")
+    sip  = obj.get("sip")
+    tmac = obj.get("arp.tmac")
+    tip  = obj.get("arp.tip")
+    op   = safe_int(obj.get("arp.op"))
+
+    src_id = get_host_id(smac, sip)
+    tgt_id = get_host_id(tmac, tip)
+
+    return {
+        "arp_src_host_id": float(src_id),
+        "arp_tgt_host_id": float(tgt_id),
+        "arp_op_num":      float(op),
+    }
+
+# ==========================
+# dns feature
+# ==========================
+
+def build_dns_features(
+    obj: Dict[str, Any],
+    norm_params: Dict[str, Any]
+) -> Dict[str, float]:
+    qc = safe_int(obj.get("dns.qc"))
+    ac = safe_int(obj.get("dns.ac"))
+
+    qc_min = norm_params["dns_qc_min"]
+    qc_max = norm_params["dns_qc_max"]
+    ac_min = norm_params["dns_ac_min"]
+    ac_max = norm_params["dns_ac_max"]
+
+    qc_norm = minmax_norm(float(qc), qc_min, qc_max)
+    ac_norm = minmax_norm(float(ac), ac_min, ac_max)
+
+    return {
+        "dns_qc":       float(qc),
+        "dns_ac":       float(ac),
+        "dns_qc_norm":  float(qc_norm),
+        "dns_ac_norm":  float(ac_norm),
+    }
+
+# ==========================
+# 메인 변환 로직
+# ==========================
+
+COLUMNS = [
+    # 메타
+    "window_id", "pattern", "index", "packet_idx", "protocol", "delta_t",
+    # common
+    "src_host_id", "dst_host_id", "sp_norm", "dp_norm", "dir_code", "len_norm",
+    # s7comm
+    "s7comm_ros_norm", "s7comm_fn", "s7comm_db_norm", "s7comm_addr_norm",
+    # modbus
+    "modbus_addr_norm", "modbus_fc_norm", "modbus_qty_norm", "modbus_bc_norm",
+    "modbus_regs_count", "modbus_regs_addr_min", "modbus_regs_addr_max",
+    "modbus_regs_addr_range",
+    "modbus_regs_val_min", "modbus_regs_val_max",
+    "modbus_regs_val_mean", "modbus_regs_val_std",
+    # xgt_fen
+    "xgt_var_id", "xgt_var_cnt", "xgt_source", "xgt_fenet_base",
+    "xgt_fenet_slot", "xgt_cmd", "xgt_dtype", "xgt_blkcnt",
+    "xgt_err_flag", "xgt_err_code", "xgt_datasize", "xgt_data_missing",
+    "xgt_data_len_chars", "xgt_data_num_spaces", "xgt_data_is_hex",
+    "xgt_data_n_bytes", "xgt_data_zero_ratio",
+    "xgt_data_first_byte", "xgt_data_last_byte",
+    "xgt_data_mean_byte", "xgt_data_bucket",
+    # arp
+    "arp_src_host_id", "arp_tgt_host_id", "arp_op_num",
+    # dns
+    "dns_qc", "dns_ac", "dns_qc_norm", "dns_ac_norm",
+]
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-i", "--input", required=True,
+                        help="패턴 윈도우 JSONL 경로")
+    parser.add_argument("-p", "--pre_dir", required=True,
+                        help="전처리 파라미터 JSON들이 모여있는 디렉토리")
+    parser.add_argument("-o", "--output", required=True,
+                        help="출력 CSV 경로")
+    parser.add_argument("--json-output", default=None,
+                        help="추가로 저장할 feature JSONL 경로 (생략 시 CSV 경로 기준 .jsonl 생성)")
+    args = parser.parse_args()
+
+    input_path = Path(args.input)
+    pre_dir = Path(args.pre_dir)
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.json_output:
+        jsonl_path = Path(args.json_output)
+    else:
+        jsonl_path = output_path.with_suffix(".jsonl")
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ----- 파라미터 로딩 -----
+    # common
+    common_host_map = load_json(pre_dir / "common_host_map.json")
+    common_norm_params = load_json(pre_dir / "common_norm_params.json")
+
+    # s7comm
+    s7comm_norm_params = load_json(pre_dir / "s7comm_norm_params.json")
+
+    # modbus
+    modbus_norm_params = load_json(pre_dir / "modbus_norm_params.json")
+
+    # xgt_fen
+    xgt_var_vocab = load_json(pre_dir / "xgt_var_vocab.json")
+    xgt_fen_norm_params = load_json(pre_dir / "xgt_fen_norm_params.json")  # 현재 raw만 사용
+
+    # arp
+    arp_host_map = load_json(pre_dir / "arp_host_map.json")
+
+    # dns
+    dns_norm_params = load_json(pre_dir / "dns_norm_params.json")
+
+    # ----- CSV + JSONL 작성 -----
+    with input_path.open("r", encoding="utf-8") as fin, \
+         output_path.open("w", encoding="utf-8", newline="") as fout_csv, \
+         jsonl_path.open("w", encoding="utf-8") as fout_jsonl:
+
+        writer = csv.DictWriter(fout_csv, fieldnames=COLUMNS)
+        writer.writeheader()
+
+        line_cnt = 0
+        row_cnt = 0
+        win_cnt = 0
+
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                win_obj = json.loads(line)
+            except Exception:
+                continue
+
+            line_cnt += 1
+            window_id = win_obj.get("window_id")
+            pattern = win_obj.get("pattern")
+            seq_group = win_obj.get("sequence_group", [])
+            index_list = win_obj.get("index", [])
+
+            seq_feature_group: List[Dict[str, Any]] = []
+
+            for idx, pkt in enumerate(seq_group):
+                protocol_str = pkt.get("protocol", "")
+                protocol_code = protocol_to_code(protocol_str)
+                delta_t = safe_float(pkt.get("delta_t", 0.0))
+
+                # 원래 window의 index 배열에서 해당 index 가져오기
+                if isinstance(index_list, list) and idx < len(index_list):
+                    orig_index = index_list[idx]
+                else:
+                    orig_index = idx  # fallback
+
+                # 기본 row는 0으로 채우기
+                row: Dict[str, Any] = {col: 0.0 for col in COLUMNS}
+
+                # 메타
+                row["window_id"] = window_id
+                row["pattern"] = pattern
+                row["index"] = float(orig_index)
+                row["packet_idx"] = float(idx)
+                row["protocol"] = float(protocol_code)
+                row["delta_t"] = float(delta_t)
+
+                # common feature
+                common_feat = build_common_features(pkt, common_host_map, common_norm_params)
+                row.update(common_feat)
+
+                # 프로토콜별 feature 추가
+                if protocol_str == "s7comm":
+                    s7_feat = build_s7comm_features(pkt, s7comm_norm_params)
+                    row.update(s7_feat)
+
+                elif protocol_str == "modbus":
+                    mb_feat = build_modbus_features(pkt, modbus_norm_params)
+                    row.update(mb_feat)
+
+                elif protocol_str == "xgt_fen":
+                    xgt_feat = build_xgt_fen_features(pkt, xgt_var_vocab, xgt_fen_norm_params)
+                    row.update(xgt_feat)
+
+                elif protocol_str == "arp":
+                    arp_feat = build_arp_features(pkt, arp_host_map)
+                    row.update(arp_feat)
+
+                elif protocol_str == "dns":
+                    dns_feat = build_dns_features(pkt, dns_norm_params)
+                    row.update(dns_feat)
+
+                # CSV 한 줄 기록
+                writer.writerow(row)
+                row_cnt += 1
+
+                # JSONL용 packet feature (window_id, pattern은 상위에 두고 나머지)
+                JSONL_EXCLUDE = {"window_id", "pattern", "index", "packet_idx"}
+                pkt_feat = {k: row[k] for k in COLUMNS if k not in JSONL_EXCLUDE}
+                seq_feature_group.append(pkt_feat)
+
+            # window 단위 JSONL 한 줄
+            out_obj = {
+                "window_id": window_id,
+                "pattern": pattern,
+                "index": index_list,
+                "sequence_group": seq_feature_group,
+            }
+            fout_jsonl.write(json.dumps(out_obj, ensure_ascii=False) + "\n")
+            win_cnt += 1
+
+    print(f"✅ 완료: {line_cnt}개 윈도우에서 {row_cnt}개 패킷 feature 추출")
+    print(f"→ CSV : {output_path}")
+    print(f"→ JSONL: {jsonl_path}")
+
+if __name__ == "__main__":
+    main()
+
+"""
+python 2.window_to_feature_csv.py --input "../data/pattern_windows.jsonl" --pre_dir "../result" --output "../result/pattern_features.csv"    
+
+
+"""
