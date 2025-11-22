@@ -4,54 +4,53 @@
 """
 window_to_feature_csv_dynamic_index.py
 
-패턴 윈도우 JSONL (window_id, pattern, sequence_group, index 포함) →
+패턴 윈도우 JSONL (window_id, pattern, index, sequence_group 포함) →
 
 1) --max-index 가 주어지면:
    - global_window_size = max_index 로 고정
-
-   각 윈도우에 대해
-   - base_idx = min(index_list)
-   - 각 패킷을 pos = (orig_index - base_idx) 위치에 매핑
-   - pos 가 [0, global_window_size-1] 범위 안일 때만 사용
-   - 비어 있는 pos 는 0-padding row로 채움
+   - 각 윈도우에 대해
+       span = max(index) - min(index)
+       → span < max_index 인 윈도우만 사용 (span 이 크거나 같은 윈도우는 버림)
+         예) max_index=30 일 때
+             index = [0, 30]  → span = 30  → 제거
+             index = [1, 4, 5] → span = 4  → 통과
+   - 각 윈도우 내에서
+       base_idx = min(index_list)
+       각 패킷을 pos = (orig_index - base_idx) 위치에 매핑
+       pos 가 [0, global_window_size-1] 범위 안일 때만 사용
+       비어 있는 pos 는 0-padding row로 채움
 
 2) --max-index 를 주지 않으면:
-   - span = max(index) - min(index)
-   - 모든 윈도우 중 가장 큰 span + 1 을 global_window_size 로 사용
+   - global_window_size =
+       • 우선 index 리스트 길이의 최댓값
+       • 만약 index 가 없으면 sequence_group 길이의 최댓값
+       • 그래도 없으면 1
 
 출력:
-  1) CSV  : 패킷 단위 row
-        (window_id, pattern, index(=pos), packet_idx(=pos), protocol, delta_t, ... feature)
-        → index / packet_idx 둘 다 0 ~ global_window_size-1 (로컬 인덱스)
-
-  2) JSONL: window 단위 line
+  - JSONL: 원본이 아니라, 각 window에 대해
         {
           "window_id": ...,
           "pattern": ...,
-          "index": [0, 1, ..., global_window_size-1],   # 로컬 index
+          "index": [... 원본 index ...],
+          "base_idx": ...,
+          "span": ...,
+          "window_size": T,
           "sequence_group": [
-             {  # pos별 feature (0-padding 포함)
-               "packet_idx": ...,
-               "protocol": ...,
-               "delta_t": ...,
-               ...
+             {
+               "pos": 0,
+               "orig_index": <원본 index 또는 null>,
+               "has_real_pkt": 0/1,
+               "protocol": <code>,
+               "delta_t": <float>,
+               <FEATURE_COLUMNS ...>
              },
              ...
-          ]  # 길이 = global_window_size
+          ]
         }
-
-예)
-  원래 index_list = [30, 40], --max-index=40 인 경우
-    base_idx = 30
-    orig_index=30 → pos=0
-    orig_index=40 → pos=10
-    최종 index = [0, 1, ..., 39]
-    pos 0, 10 에만 실제 패킷, 나머지는 0-padding
 """
 
 import json
 import argparse
-import csv
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -69,20 +68,24 @@ PROTOCOL_MAP = {
     "dns": 8,
 }
 
+
 def protocol_to_code(p: str) -> int:
     if not p:
         return 0
     return PROTOCOL_MAP.get(p, 0)
+
 
 def load_json(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"❌ 필요 파일 없음: {path}")
     return json.loads(path.read_text(encoding="utf-8"))
 
+
 def minmax_norm(x: float, vmin: float, vmax: float) -> float:
     if vmax is None or vmin is None or vmax <= vmin:
         return 0.0
     return (x - vmin) / (vmax - vmin + 1e-9)
+
 
 def safe_int(val: Any, default: int = 0) -> int:
     try:
@@ -92,6 +95,7 @@ def safe_int(val: Any, default: int = 0) -> int:
     except Exception:
         return default
 
+
 def safe_float(val: Any, default: float = 0.0) -> float:
     try:
         if isinstance(val, list) and val:
@@ -100,9 +104,11 @@ def safe_float(val: Any, default: float = 0.0) -> float:
     except Exception:
         return default
 
+
 # ==========================
 # common host embed (smac/sip, dmac/dip)
 # ==========================
+
 
 def get_host_id_factory(host_map: Dict[str, int]):
     next_id = max(host_map.values()) + 1 if host_map else 1
@@ -113,26 +119,26 @@ def get_host_id_factory(host_map: Dict[str, int]):
             return 0  # UNK
         key = f"{mac}|{ip}"
         if key not in host_map:
-            # 새 host도 일단 ID 부여 (파일에는 다시 안 저장)
             host_map[key] = next_id
             next_id += 1
         return host_map[key]
 
     return get_host_id
 
+
 def build_common_features(
     obj: Dict[str, Any],
     host_map: Dict[str, int],
-    norm_params: Dict[str, Any]
+    norm_params: Dict[str, Any],
 ) -> Dict[str, float]:
     get_host_id = get_host_id_factory(host_map)
 
     smac = obj.get("smac")
-    sip  = obj.get("sip")
+    sip = obj.get("sip")
     dmac = obj.get("dmac")
-    dip  = obj.get("dip")
-    sp   = safe_int(obj.get("sp"))
-    dp   = safe_int(obj.get("dp"))
+    dip = obj.get("dip")
+    sp = safe_int(obj.get("sp"))
+    dp = safe_int(obj.get("dp"))
     length = safe_int(obj.get("len"))
     dir_raw = obj.get("dir")
 
@@ -148,61 +154,65 @@ def build_common_features(
     len_min = norm_params["len_min"]
     len_max = norm_params["len_max"]
 
-    sp_norm  = minmax_norm(float(sp),  sp_min,  sp_max)
-    dp_norm  = minmax_norm(float(dp),  dp_min,  dp_max)
+    sp_norm = minmax_norm(float(sp), sp_min, sp_max)
+    dp_norm = minmax_norm(float(dp), dp_min, dp_max)
     len_norm = minmax_norm(float(length), len_min, len_max)
 
     return {
         "src_host_id": float(src_id),
         "dst_host_id": float(dst_id),
-        "sp_norm":     float(sp_norm),
-        "dp_norm":     float(dp_norm),
-        "dir_code":    float(dir_code),
-        "len_norm":    float(len_norm),
+        "sp_norm": float(sp_norm),
+        "dp_norm": float(dp_norm),
+        "dir_code": float(dir_code),
+        "len_norm": float(len_norm),
     }
+
 
 # ==========================
 # s7comm feature
 # ==========================
 
+
 def build_s7comm_features(
     obj: Dict[str, Any],
-    norm_params: Dict[str, Any]
+    norm_params: Dict[str, Any],
 ) -> Dict[str, float]:
     ros = safe_int(obj.get("s7comm.ros"))
-    fn  = safe_int(obj.get("s7comm.fn"))
-    db  = safe_int(obj.get("s7comm.db"))
+    fn = safe_int(obj.get("s7comm.fn"))
+    db = safe_int(obj.get("s7comm.db"))
     addr = safe_int(obj.get("s7comm.addr"))
 
-    ros_cfg  = norm_params.get("s7comm.ros", {})
-    db_cfg   = norm_params.get("s7comm.db", {})
+    ros_cfg = norm_params.get("s7comm.ros", {})
+    db_cfg = norm_params.get("s7comm.db", {})
     addr_cfg = norm_params.get("s7comm.addr", {})
 
-    ros_min  = ros_cfg.get("min")
-    ros_max  = ros_cfg.get("max")
-    db_min   = db_cfg.get("min")
-    db_max   = db_cfg.get("max")
+    ros_min = ros_cfg.get("min")
+    ros_max = ros_cfg.get("max")
+    db_min = db_cfg.get("min")
+    db_max = db_cfg.get("max")
     addr_min = addr_cfg.get("min")
     addr_max = addr_cfg.get("max")
 
-    ros_norm  = minmax_norm(float(ros),  ros_min,  ros_max)
-    db_norm   = minmax_norm(float(db),   db_min,   db_max)
+    ros_norm = minmax_norm(float(ros), ros_min, ros_max)
+    db_norm = minmax_norm(float(db), db_min, db_max)
     addr_norm = minmax_norm(float(addr), addr_min, addr_max)
 
     return {
         "s7comm_ros_norm": float(ros_norm),
-        "s7comm_fn":       float(fn),
-        "s7comm_db_norm":  float(db_norm),
+        "s7comm_fn": float(fn),
+        "s7comm_db_norm": float(db_norm),
         "s7comm_addr_norm": float(addr_norm),
     }
+
 
 # ==========================
 # modbus feature
 # ==========================
 
+
 def _parse_int_list(val: Any) -> List[int]:
     if isinstance(val, list):
-        out = []
+        out: List[int] = []
         for v in val:
             try:
                 out.append(int(v))
@@ -211,6 +221,7 @@ def _parse_int_list(val: Any) -> List[int]:
         return out
     return []
 
+
 def _compute_regs_addr_stats(addrs: List[int]) -> Tuple[int, float, float, float]:
     if not addrs:
         return 0, 0.0, 0.0, 0.0
@@ -218,6 +229,7 @@ def _compute_regs_addr_stats(addrs: List[int]) -> Tuple[int, float, float, float
     amin = float(min(addrs))
     amax = float(max(addrs))
     return c, amin, amax, amax - amin
+
 
 def _compute_regs_val_stats(vals: List[int]) -> Tuple[float, float, float, float]:
     if not vals:
@@ -229,61 +241,64 @@ def _compute_regs_val_stats(vals: List[int]) -> Tuple[float, float, float, float
     std = var ** 0.5
     return vmin, vmax, mean, std
 
+
 def build_modbus_features(
     obj: Dict[str, Any],
-    norm_params: Dict[str, Any]
+    norm_params: Dict[str, Any],
 ) -> Dict[str, float]:
     addr = safe_int(obj.get("modbus.addr"))
-    fc   = safe_int(obj.get("modbus.fc"))
-    qty  = safe_int(obj.get("modbus.qty"))
-    bc   = safe_int(obj.get("modbus.bc"))
+    fc = safe_int(obj.get("modbus.fc"))
+    qty = safe_int(obj.get("modbus.qty"))
+    bc = safe_int(obj.get("modbus.bc"))
 
     regs_addr = obj.get("modbus.regs.addr")
-    regs_val  = obj.get("modbus.regs.val")
+    regs_val = obj.get("modbus.regs.val")
 
     addr_cfg = norm_params.get("modbus.addr", {})
-    fc_cfg   = norm_params.get("modbus.fc", {})
-    qty_cfg  = norm_params.get("modbus.qty", {})
-    bc_cfg   = norm_params.get("modbus.bc", {})
+    fc_cfg = norm_params.get("modbus.fc", {})
+    qty_cfg = norm_params.get("modbus.qty", {})
+    bc_cfg = norm_params.get("modbus.bc", {})
 
     addr_min = addr_cfg.get("min")
     addr_max = addr_cfg.get("max")
-    fc_min   = fc_cfg.get("min")
-    fc_max   = fc_cfg.get("max")
-    qty_min  = qty_cfg.get("min")
-    qty_max  = qty_cfg.get("max")
-    bc_min   = bc_cfg.get("min")
-    bc_max   = bc_cfg.get("max")
+    fc_min = fc_cfg.get("min")
+    fc_max = fc_cfg.get("max")
+    qty_min = qty_cfg.get("min")
+    qty_max = qty_cfg.get("max")
+    bc_min = bc_cfg.get("min")
+    bc_max = bc_cfg.get("max")
 
     addr_norm = minmax_norm(float(addr), addr_min, addr_max)
-    fc_norm   = minmax_norm(float(fc),   fc_min,   fc_max)
-    qty_norm  = minmax_norm(float(qty),  qty_min,  qty_max)
-    bc_norm   = minmax_norm(float(bc),   bc_min,   bc_max)
+    fc_norm = minmax_norm(float(fc), fc_min, fc_max)
+    qty_norm = minmax_norm(float(qty), qty_min, qty_max)
+    bc_norm = minmax_norm(float(bc), bc_min, bc_max)
 
     addrs = _parse_int_list(regs_addr)
-    vals  = _parse_int_list(regs_val)
+    vals = _parse_int_list(regs_val)
 
     c, amin, amax, arange = _compute_regs_addr_stats(addrs)
     vmin, vmax, vmean, vstd = _compute_regs_val_stats(vals)
 
     return {
-        "modbus_addr_norm":       float(addr_norm),
-        "modbus_fc_norm":         float(fc_norm),
-        "modbus_qty_norm":        float(qty_norm),
-        "modbus_bc_norm":         float(bc_norm),
-        "modbus_regs_count":      float(c),
-        "modbus_regs_addr_min":   float(amin),
-        "modbus_regs_addr_max":   float(amax),
+        "modbus_addr_norm": float(addr_norm),
+        "modbus_fc_norm": float(fc_norm),
+        "modbus_qty_norm": float(qty_norm),
+        "modbus_bc_norm": float(bc_norm),
+        "modbus_regs_count": float(c),
+        "modbus_regs_addr_min": float(amin),
+        "modbus_regs_addr_max": float(amax),
         "modbus_regs_addr_range": float(arange),
-        "modbus_regs_val_min":    float(vmin),
-        "modbus_regs_val_max":    float(vmax),
-        "modbus_regs_val_mean":   float(vmean),
-        "modbus_regs_val_std":    float(vstd),
+        "modbus_regs_val_min": float(vmin),
+        "modbus_regs_val_max": float(vmax),
+        "modbus_regs_val_mean": float(vmean),
+        "modbus_regs_val_std": float(vstd),
     }
+
 
 # ==========================
 # xgt_fen feature
 # ==========================
+
 
 def get_var_id_factory(var_map: Dict[str, int]):
     next_id = max(var_map.values()) + 1 if var_map else 1
@@ -303,12 +318,6 @@ def get_var_id_factory(var_map: Dict[str, int]):
 
     return get_var_id
 
-def _decode_data_hex(hex_str: str) -> List[int]:
-    try:
-        bs = bytes.fromhex(hex_str)
-    except Exception:
-        return []
-    return list(bs)
 
 def _bucket_by_mean(mean_byte: float) -> int:
     if mean_byte <= 64:
@@ -320,10 +329,11 @@ def _bucket_by_mean(mean_byte: float) -> int:
     else:
         return 3
 
+
 def build_xgt_fen_features(
     obj: Dict[str, Any],
     var_map: Dict[str, int],
-    norm_params: Dict[str, Any]
+    norm_params: Dict[str, Any],
 ) -> Dict[str, float]:
     feat: Dict[str, float] = {}
 
@@ -399,21 +409,23 @@ def build_xgt_fen_features(
 
     return feat
 
+
 # ==========================
 # arp feature
 # ==========================
 
+
 def build_arp_features(
     obj: Dict[str, Any],
-    host_map: Dict[str, int]
+    host_map: Dict[str, int],
 ) -> Dict[str, float]:
     get_host_id = get_host_id_factory(host_map)
 
     smac = obj.get("smac")
-    sip  = obj.get("sip")
+    sip = obj.get("sip")
     tmac = obj.get("arp.tmac")
-    tip  = obj.get("arp.tip")
-    op   = safe_int(obj.get("arp.op"))
+    tip = obj.get("arp.tip")
+    op = safe_int(obj.get("arp.op"))
 
     src_id = get_host_id(smac, sip)
     tgt_id = get_host_id(tmac, tip)
@@ -421,16 +433,18 @@ def build_arp_features(
     return {
         "arp_src_host_id": float(src_id),
         "arp_tgt_host_id": float(tgt_id),
-        "arp_op_num":      float(op),
+        "arp_op_num": float(op),
     }
 
+
 # ==========================
-# dns feature
+# dns feature (정규화만 사용)
 # ==========================
+
 
 def build_dns_features(
     obj: Dict[str, Any],
-    norm_params: Dict[str, Any]
+    norm_params: Dict[str, Any],
 ) -> Dict[str, float]:
     qc = safe_int(obj.get("dns.qc"))
     ac = safe_int(obj.get("dns.ac"))
@@ -444,91 +458,113 @@ def build_dns_features(
     ac_norm = minmax_norm(float(ac), ac_min, ac_max)
 
     return {
-        "dns_qc":       float(qc),
-        "dns_ac":       float(ac),
-        "dns_qc_norm":  float(qc_norm),
-        "dns_ac_norm":  float(ac_norm),
+        "dns_qc_norm": float(qc_norm),
+        "dns_ac_norm": float(ac_norm),
     }
+
 
 # ==========================
 # 메인 변환 로직
 # ==========================
 
-# 메타 + feature 컬럼 나누기
 META_COLUMNS = [
-    "window_id", "pattern", "index", "packet_idx", "protocol", "delta_t",
+    "window_id",
+    "pattern",
+    "protocol",
+    "delta_t",
 ]
 
 FEATURE_COLUMNS = [
     # common
-    "src_host_id", "dst_host_id", "sp_norm", "dp_norm", "dir_code", "len_norm",
+    "src_host_id",
+    "dst_host_id",
+    "sp_norm",
+    "dp_norm",
+    "dir_code",
+    "len_norm",
     # s7comm
-    "s7comm_ros_norm", "s7comm_fn", "s7comm_db_norm", "s7comm_addr_norm",
+    "s7comm_ros_norm",
+    "s7comm_fn",
+    "s7comm_db_norm",
+    "s7comm_addr_norm",
     # modbus
-    "modbus_addr_norm", "modbus_fc_norm", "modbus_qty_norm", "modbus_bc_norm",
-    "modbus_regs_count", "modbus_regs_addr_min", "modbus_regs_addr_max",
+    "modbus_addr_norm",
+    "modbus_fc_norm",
+    "modbus_qty_norm",
+    "modbus_bc_norm",
+    "modbus_regs_count",
+    "modbus_regs_addr_min",
+    "modbus_regs_addr_max",
     "modbus_regs_addr_range",
-    "modbus_regs_val_min", "modbus_regs_val_max",
-    "modbus_regs_val_mean", "modbus_regs_val_std",
+    "modbus_regs_val_min",
+    "modbus_regs_val_max",
+    "modbus_regs_val_mean",
+    "modbus_regs_val_std",
     # xgt_fen
-    "xgt_var_id", "xgt_var_cnt", "xgt_source", "xgt_fenet_base",
-    "xgt_fenet_slot", "xgt_cmd", "xgt_dtype", "xgt_blkcnt",
-    "xgt_err_flag", "xgt_err_code", "xgt_datasize", "xgt_data_missing",
-    "xgt_data_len_chars", "xgt_data_num_spaces", "xgt_data_is_hex",
-    "xgt_data_n_bytes", "xgt_data_zero_ratio",
-    "xgt_data_first_byte", "xgt_data_last_byte",
-    "xgt_data_mean_byte", "xgt_data_bucket",
+    "xgt_var_id",
+    "xgt_var_cnt",
+    "xgt_source",
+    "xgt_fenet_base",
+    "xgt_fenet_slot",
+    "xgt_cmd",
+    "xgt_dtype",
+    "xgt_blkcnt",
+    "xgt_err_flag",
+    "xgt_err_code",
+    "xgt_datasize",
+    "xgt_data_missing",
+    "xgt_data_len_chars",
+    "xgt_data_num_spaces",
+    "xgt_data_is_hex",
+    "xgt_data_n_bytes",
+    "xgt_data_zero_ratio",
+    "xgt_data_first_byte",
+    "xgt_data_last_byte",
+    "xgt_data_mean_byte",
+    "xgt_data_bucket",
     # arp
-    "arp_src_host_id", "arp_tgt_host_id", "arp_op_num",
+    "arp_src_host_id",
+    "arp_tgt_host_id",
+    "arp_op_num",
     # dns
-    "dns_qc", "dns_ac", "dns_qc_norm", "dns_ac_norm",
+    "dns_qc_norm",
+    "dns_ac_norm",
 ]
 
 COLUMNS = META_COLUMNS + FEATURE_COLUMNS
 
 
-# COLUMNS = [
-#     # 메타
-#     "window_id", "pattern", "index", "packet_idx", "protocol", "delta_t",
-#     # common
-#     "src_host_id", "dst_host_id", "sp_norm", "dp_norm", "dir_code", "len_norm",
-#     # s7comm
-#     "s7comm_ros_norm", "s7comm_fn", "s7comm_db_norm", "s7comm_addr_norm",
-#     # modbus
-#     "modbus_addr_norm", "modbus_fc_norm", "modbus_qty_norm", "modbus_bc_norm",
-#     "modbus_regs_count", "modbus_regs_addr_min", "modbus_regs_addr_max",
-#     "modbus_regs_addr_range",
-#     "modbus_regs_val_min", "modbus_regs_val_max",
-#     "modbus_regs_val_mean", "modbus_regs_val_std",
-#     # xgt_fen
-#     "xgt_var_id", "xgt_var_cnt", "xgt_source", "xgt_fenet_base",
-#     "xgt_fenet_slot", "xgt_cmd", "xgt_dtype", "xgt_blkcnt",
-#     "xgt_err_flag", "xgt_err_code", "xgt_datasize", "xgt_data_missing",
-#     "xgt_data_len_chars", "xgt_data_num_spaces", "xgt_data_is_hex",
-#     "xgt_data_n_bytes", "xgt_data_zero_ratio",
-#     "xgt_data_first_byte", "xgt_data_last_byte",
-#     "xgt_data_mean_byte", "xgt_data_bucket",
-#     # arp
-#     "arp_src_host_id", "arp_tgt_host_id", "arp_op_num",
-#     # dns
-#     "dns_qc", "dns_ac", "dns_qc_norm", "dns_ac_norm",
-# ]
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-i", "--input", required=True,
-                        help="패턴 윈도우 JSONL 경로")
-    parser.add_argument("-p", "--pre_dir", required=True,
-                        help="전처리 파라미터 JSON들이 모여있는 디렉토리")
-    parser.add_argument("-o", "--output", required=True,
-                        help="출력 CSV 경로")
-    parser.add_argument("--json-output", default=None,
-                        help="추가로 저장할 feature JSONL 경로 (생략 시 CSV 경로 기준 .jsonl 생성)")
+    parser.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help="패턴 윈도우 JSONL 경로",
+    )
+    parser.add_argument(
+        "-p",
+        "--pre_dir",
+        required=True,
+        help="전처리 파라미터 JSON들이 모여있는 디렉토리",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="출력 기준 경로 (기본: .jsonl)",
+    )
+    parser.add_argument(
+        "--json-output",
+        default=None,
+        help="저장할 feature JSONL 경로 (생략 시 --output 의 .jsonl로 저장)",
+    )
     parser.add_argument(
         "--max-index",
         type=int,
         default=None,
-        help="(옵션) window_size (T). 지정하면 각 윈도우 길이를 이 값으로 고정"
+        help="(옵션) window_size (T). 지정하면 "
+             "span = max(index) - min(index) < T 인 윈도우만 사용",
     )
 
     args = parser.parse_args()
@@ -541,6 +577,7 @@ def main():
     if args.json_output:
         jsonl_path = Path(args.json_output)
     else:
+        # 예전처럼 .csv 주면 같은 이름의 .jsonl로 저장
         jsonl_path = output_path.with_suffix(".jsonl")
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -557,7 +594,7 @@ def main():
     arp_host_map = load_json(pre_dir / "arp_host_map.json")
     dns_norm_params = load_json(pre_dir / "dns_norm_params.json")
 
-    # ----- 1PASS: 모든 윈도우 로딩 + span 통계 (디버그용) -----
+    # ----- 1PASS: 윈도우 로딩 -----
     windows: List[Dict[str, Any]] = []
     line_cnt_raw = 0
 
@@ -573,122 +610,35 @@ def main():
             windows.append(win_obj)
             line_cnt_raw += 1
 
-    max_span = -1
-    max_span_windows_info: List[Dict[str, Any]] = []
-    span_list: List[int] = []
-
-    for w in windows:
-        index_list = w.get("index", [])
-        if not isinstance(index_list, list) or not index_list:
-            continue
-
-        try:
-            idx_min = int(min(index_list))
-            idx_max = int(max(index_list))
-        except Exception:
-            continue
-
-        span = idx_max - idx_min
-        span_list.append(span)
-
-        info = {
-            "window_id": w.get("window_id"),
-            "pattern": w.get("pattern"),
-            "index": index_list,
-            "idx_min": idx_min,
-            "idx_max": idx_max,
-            "span": span,
-        }
-
-        if span > max_span:
-            max_span = span
-            max_span_windows_info = [info]
-        elif span == max_span:
-            max_span_windows_info.append(info)
-
-    # span 기반 window_size (디폴트용)
-    global_window_size = max_span + 1 if max_span >= 0 else 0
-
-    if global_window_size <= 0:
-        for w in windows:
-            seq = w.get("sequence_group", [])
-            if isinstance(seq, list) and len(seq) > global_window_size:
-                global_window_size = len(seq)
-    if global_window_size <= 0:
-        global_window_size = 1
-
-    # span 통계 (디버그) -----------------
-    print(f"📏 global_window_size (index span 기반): {global_window_size}")
-    print(f"📦 총 윈도우 수: {len(windows)}")
-
-    if max_span_windows_info:
-        print("🔎 max span window index 예시:", max_span_windows_info[0]["index"])
-
-    span_stats = {}
-    span_hist: Dict[str, int] = {}
-
-    if span_list:
-        import numpy as np
-
-        span_arr = np.array(span_list, dtype=float)
-        span_stats = {
-            "count": int(len(span_list)),
-            "min": float(np.min(span_arr)),
-            "max": float(np.max(span_arr)),
-            "mean": float(np.mean(span_arr)),
-            "std": float(np.std(span_arr)),
-            "p50": float(np.percentile(span_arr, 50)),
-            "p90": float(np.percentile(span_arr, 90)),
-            "p95": float(np.percentile(span_arr, 95)),
-            "p99": float(np.percentile(span_arr, 99)),
-        }
-
-        from collections import Counter
-        cnt = Counter(span_list)
-        span_hist = {str(k): int(v) for k, v in sorted(cnt.items())}
-
-        print("📊 span( max(index) - min(index) ) 통계:", span_stats)
-    else:
-        span_stats = {
-            "count": 0,
-            "min": None,
-            "max": None,
-            "mean": None,
-            "std": None,
-            "p50": None,
-            "p90": None,
-            "p95": None,
-            "p99": None,
-        }
-        span_hist = {}
-
-    debug_path = output_path.with_name("pattern_features.json")
-    debug_obj = {
-        "global_window_size_span_based": global_window_size,
-        "max_span": max_span,
-        "window_count": len(max_span_windows_info),
-        "windows": max_span_windows_info,
-        "span_stats": span_stats,
-        "span_hist": span_hist,
-    }
-    debug_path.write_text(json.dumps(debug_obj, ensure_ascii=False, indent=2),
-                          encoding="utf-8")
-    print(f"   ↳ span 분포 정보 JSON 저장: {debug_path}")
-
-    # ### 변경: 실제 사용할 window_size 를 --max-index로 덮어쓰기
+    # ----- global_window_size 결정 (span 기반 X) -----
     if args.max_index is not None:
         global_window_size = args.max_index
+    else:
+        global_window_size = 0
+        # 1순위: index 리스트 길이의 최대값
+        for w in windows:
+            idx_list = w.get("index", [])
+            if isinstance(idx_list, list) and len(idx_list) > global_window_size:
+                global_window_size = len(idx_list)
+        # 2순위: sequence_group 길이의 최대값
+        if global_window_size <= 0:
+            for w in windows:
+                seq = w.get("sequence_group", [])
+                if isinstance(seq, list) and len(seq) > global_window_size:
+                    global_window_size = len(seq)
+        if global_window_size <= 0:
+            global_window_size = 1
+
+    print(f"📦 총 윈도우 수: {len(windows)}")
     print(f"📏 실제 사용 global_window_size (== window_size): {global_window_size}")
 
-    # ----- 2PASS: CSV + JSONL 작성 -----
-    with output_path.open("w", encoding="utf-8", newline="") as fout_csv, \
-         jsonl_path.open("w", encoding="utf-8") as fout_jsonl:
+    # ----- JSONL 작성 -----
+    # ----- JSONL 작성 -----
+    with jsonl_path.open("w", encoding="utf-8") as fout_jsonl:
 
-        writer = csv.DictWriter(fout_csv, fieldnames=COLUMNS)
-        writer.writeheader()
-
-        total_row_cnt = 0
         win_cnt = 0
+        skipped_by_span = 0
+        total_row_cnt = 0  # 윈도우 * window_size (정보용)
 
         for win_obj in windows:
             window_id = win_obj.get("window_id")
@@ -701,7 +651,25 @@ def main():
             if not isinstance(index_list, list):
                 index_list = []
 
-            # base_idx = min(index_list)
+            # ----- span 계산 및 필터링 -----
+            span = None
+            idx_min = None
+            idx_max = None
+            if index_list:
+                try:
+                    idx_min = int(min(index_list))
+                    idx_max = int(max(index_list))
+                    span = idx_max - idx_min
+                except Exception:
+                    span = None
+
+            if args.max_index is not None and span is not None:
+                # span >= max_index → 제거 (JSONL에도 안 나감)
+                if span >= args.max_index:
+                    skipped_by_span += 1
+                    continue
+
+            # base_idx = min(index_list) (비어있으면 0)
             if index_list:
                 try:
                     base_idx = int(min(index_list))
@@ -710,40 +678,55 @@ def main():
             else:
                 base_idx = 0
 
-            pos_to_pkt: Dict[int, Dict[str, Any]] = {}
+            # 👉 상대 인덱스 리스트(0부터 시작) 생성
+            rel_index_list: List[int] = []
+            for idx in index_list:
+                try:
+                    idx_int = int(idx)
+                except Exception:
+                    # 변환 안 되면 0 기준으로만 넣어도 됨 (혹은 건너뛰기)
+                    continue
+                rel_index_list.append(idx_int - base_idx)
 
+            # pos -> (pkt, orig_index) 매핑
+            pos_to_info: Dict[int, Tuple[Dict[str, Any], int]] = {}
             for pkt, orig_idx in zip(seq_group, index_list):
                 try:
                     orig_idx_int = int(orig_idx)
                 except Exception:
                     continue
-                pos = orig_idx_int - base_idx  # 30 → 0, 40 → 10
-                if 0 <= pos < global_window_size and pos not in pos_to_pkt:
-                    pos_to_pkt[pos] = pkt
+                pos = orig_idx_int - base_idx
+                if 0 <= pos < global_window_size and pos not in pos_to_info:
+                    pos_to_info[pos] = (pkt, orig_idx_int)
 
+            # 이 윈도우의 feature 시퀀스 (JSONL용)
             seq_feature_group: List[Dict[str, Any]] = []
 
-            # 0 ~ global_window_size-1 까지 dense하게 채우기
+            # 0 ~ global_window_size-1 까지 dense하게 채우기 (중간은 0-padding)
             for pos in range(global_window_size):
-                has_real_pkt = pos in pos_to_pkt
-                pkt = pos_to_pkt[pos] if has_real_pkt else {}
+                if pos in pos_to_info:
+                    pkt, orig_idx_int = pos_to_info[pos]
+                    has_real_pkt = 1.0
+                else:
+                    pkt = {}
+                    orig_idx_int = -1
+                    has_real_pkt = 0.0
 
                 protocol_str = pkt.get("protocol", "") if has_real_pkt else ""
                 protocol_code = protocol_to_code(protocol_str)
                 delta_t = safe_float(pkt.get("delta_t", 0.0)) if has_real_pkt else 0.0
 
-                # ### 변경: index는 로컬 pos 사용 (0 ~ window_size-1)
+                # feature용 row 딕셔너리 (CSV 안 쓰지만 동일 구조 활용)
                 row: Dict[str, Any] = {col: 0.0 for col in COLUMNS}
-
                 row["window_id"] = window_id
                 row["pattern"] = pattern
-                row["index"] = float(pos)          # 로컬 index
-                row["packet_idx"] = float(pos)     # 로컬 index
                 row["protocol"] = float(protocol_code)
                 row["delta_t"] = float(delta_t)
 
                 if has_real_pkt:
-                    common_feat = build_common_features(pkt, common_host_map, common_norm_params)
+                    common_feat = build_common_features(
+                        pkt, common_host_map, common_norm_params
+                    )
                     row.update(common_feat)
 
                     if protocol_str == "s7comm":
@@ -753,7 +736,9 @@ def main():
                         mb_feat = build_modbus_features(pkt, modbus_norm_params)
                         row.update(mb_feat)
                     elif protocol_str == "xgt_fen":
-                        xgt_feat = build_xgt_fen_features(pkt, xgt_var_vocab, xgt_fen_norm_params)
+                        xgt_feat = build_xgt_fen_features(
+                            pkt, xgt_var_vocab, xgt_fen_norm_params
+                        )
                         row.update(xgt_feat)
                     elif protocol_str == "arp":
                         arp_feat = build_arp_features(pkt, arp_host_map)
@@ -761,33 +746,39 @@ def main():
                     elif protocol_str == "dns":
                         dns_feat = build_dns_features(pkt, dns_norm_params)
                         row.update(dns_feat)
-                # else: padding row 그대로 0
 
-                # CSV 한 줄 기록
-                writer.writerow(row)
                 total_row_cnt += 1
 
-                # JSONL용 packet feature (메타 제외: index/packet_idx 포함 X)
-                pkt_feat = {k: row[k] for k in FEATURE_COLUMNS}
+                # JSONL 용 feature만 추출 (pos, orig_index, has_real_pkt 제거)
+                pkt_feat: Dict[str, Any] = {
+                    "protocol": float(protocol_code),
+                    "delta_t": float(delta_t),
+                }
+                for k in FEATURE_COLUMNS:
+                    pkt_feat[k] = row[k]
                 seq_feature_group.append(pkt_feat)
 
-            # ### 변경: JSONL의 index도 0..window_size-1 로 세팅
-            new_index_list = [float(pos) for pos in range(global_window_size)]
-
+            # JSONL 출력 (원본 패킷 X, feature 시퀀스만)
             out_obj = {
                 "window_id": window_id,
                 "pattern": pattern,
-                "index": new_index_list,
+                "orig_index": index_list,      # 원본 index 그대로
+                "index": rel_index_list,       # ✅ base_idx 기준 0부터 시작하는 index
+                "base_idx": base_idx,
+                "span": span,
+                "window_size": global_window_size,
                 "sequence_group": seq_feature_group,
             }
             fout_jsonl.write(json.dumps(out_obj, ensure_ascii=False) + "\n")
             win_cnt += 1
 
     print(f"✅ 완료: 원본 {line_cnt_raw}개 라인 / {win_cnt}개 윈도우 처리")
+    if args.max_index is not None:
+        print(f"   ↳ span >= {args.max_index} 조건으로 스킵된 윈도우 수: {skipped_by_span}")
     print(f"→ window 당 길이(global_window_size): {global_window_size}")
-    print(f"→ 총 CSV row 수: {total_row_cnt}")
-    print(f"→ CSV : {output_path}")
+    print(f"→ 총 row 수(윈도우 * window_size): {total_row_cnt}")
     print(f"→ JSONL: {jsonl_path}")
+
 
 if __name__ == "__main__":
     main()
