@@ -159,6 +159,70 @@ def load_windows_to_array(
 
 
 # -------------------------------------------------------
+# 데이터 인스펙션 유틸
+# -------------------------------------------------------
+def inspect_data(
+    X: np.ndarray,
+    feature_keys: List[str],
+    window_ids: List[int],
+    patterns: List[str],
+    pad_value: float = 0.0,
+    n_samples: int = 3,
+):
+    """
+    학습 전에 X / feature / window 몇 개를 눈으로 확인하는 디버그용 함수.
+    """
+    N, T, D = X.shape
+    print("\n================= [INSPECT DATA] =================")
+    print(f"N (windows) = {N}, T (time steps) = {T}, D (features) = {D}")
+    print(f"pad_value = {pad_value}")
+    print(f"feature_keys (앞 10개): {feature_keys[:10]}")
+    print("===================================================\n")
+
+    # 전체 데이터 flatten 해서 feature별 통계
+    X_flat = X.reshape(-1, D)  # (N*T, D)
+
+    print(">>> Feature-wise 통계 (pad_value 제외):")
+    for i, k in enumerate(feature_keys):
+        col = X_flat[:, i]
+        # pad_value로만 가득한 feature면 제외
+        mask = col != pad_value
+        if not np.any(mask):
+            print(f"  - {k}: (모든 값이 pad_value={pad_value})")
+            continue
+        vals = col[mask]
+        print(
+            f"  - {k:25s} | "
+            f"min={vals.min():.4f}, max={vals.max():.4f}, "
+            f"mean={vals.mean():.4f}, std={vals.std():.4f}, "
+            f"non_pad_ratio={len(vals)/len(col):.3f}"
+        )
+
+    # 몇 개 윈도우 샘플 출력
+    print("\n>>> 샘플 윈도우 몇 개 보기:")
+    n_samples = min(n_samples, N)
+    for idx in range(n_samples):
+        print(f"\n--- Window #{idx} (global index) ---")
+        print(f"window_id = {window_ids[idx]}, pattern = {patterns[idx]}")
+        # 앞 5 timestep만
+        steps = min(5, T)
+        for t in range(steps):
+            row = X[idx, t]
+            # 이 timestep이 패딩만 있는지 여부
+            if np.all(row == pad_value):
+                print(f"  t={t:2d}: [PAD ROW]")
+            else:
+                # 앞 몇 feature만 보기
+                feat_preview_cnt = min(8, D)
+                preview = ", ".join(
+                    f"{feature_keys[j]}={row[j]:.4f}"
+                    for j in range(feat_preview_cnt)
+                )
+                print(f"  t={t:2d}: {preview}")
+    print("\n===================================================\n")
+
+
+# -------------------------------------------------------
 # main
 # -------------------------------------------------------
 
@@ -260,6 +324,12 @@ def main():
             "예: --exclude-file ../config/exclude_features.txt"
         ),
     )
+    # 👀 데이터만 보고 싶은 옵션
+    parser.add_argument(
+        "--inspect-only",
+        action="store_true",
+        help="데이터를 로드/요약 출력만 하고 학습은 수행하지 않음",
+    )
 
     args = parser.parse_args()
 
@@ -318,6 +388,19 @@ def main():
     N, T, D = X.shape
     print(f"[INFO] 데이터 shape: N={N}, T={T}, D={D}")
     print(f"[INFO] 최종 feature 수: {len(feature_keys)}")
+
+    # 👀 inspect-only 모드면 여기서 데이터만 보고 종료
+    if args.inspect_only:
+        inspect_data(
+            X,
+            feature_keys,
+            window_ids,
+            patterns,
+            pad_value=float(args.pad_value),
+            n_samples=3,
+        )
+        print("[INFO] --inspect-only 플래그로 인해 학습 없이 종료합니다.")
+        return
 
     # feature key 순서 저장
     feat_path = output_dir / "feature_keys.txt"
@@ -393,13 +476,27 @@ def main():
             # y_true, y_pred: (B, T, D)
             # 모든 feature가 pad_val인 timestep은 마스크 0
             # (원본 PyTorch 구현: (batch != pad_value).any(dim=-1))
+            not_pad = tf.reduceAny(tf.not_equal(y_true, pad_val), axis=-1)  # (B, T) bool
+            mask = tf.cast(not_pad, tf.float32)                              # (B, T)
+
+            se = tf.reduceMean(tf.square(y_pred - y_true), axis=-1)        # (B, T)
+            se_masked = se * mask
+
+            # eps로 0 나누기 방지
+            loss = tf.reduceSum(se_masked) / (tf.reduceSum(mask) + 1e-8)
+            return loss
+        return masked_mse
+
+    # 위 reduceAny / reduceMean / reduceSum 오타 주의:
+    import tensorflow as tf  # 이미 위에서 했지만 안전하게
+    def make_masked_mse(pad_val: float):
+        def masked_mse(y_true, y_pred):
             not_pad = tf.reduce_any(tf.not_equal(y_true, pad_val), axis=-1)  # (B, T) bool
             mask = tf.cast(not_pad, tf.float32)                              # (B, T)
 
             se = tf.reduce_mean(tf.square(y_pred - y_true), axis=-1)        # (B, T)
             se_masked = se * mask
 
-            # eps로 0 나누기 방지
             loss = tf.reduce_sum(se_masked) / (tf.reduce_sum(mask) + 1e-8)
             return loss
         return masked_mse
@@ -536,4 +633,6 @@ if __name__ == "__main__":
 """
 python 2.LSTM_AE.py -i "../result/pattern_features_padded_0.jsonl" -o "../../result_train/data" --epochs 400 --batch_size 64 --hidden_dim 64 --latent_dim 64 --pad_value 0.0 --device cuda --seed 42 --exclude-file "../data/exclude.txt"
 
+inspect 모드:
+python 2.LSTM_AE.py -i "../result/pattern_features_padded_0.jsonl" -o "../../result_train/inspect" --pad_value 0.0 --exclude-file "../data/exclude.txt" --inspect-only
 """
