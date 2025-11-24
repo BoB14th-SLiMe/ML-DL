@@ -87,21 +87,6 @@ def main():
     run_cmd(cmd1)
 
     # ---------------------------------------------------
-    # 2단계: 패턴 윈도우 → 패킷 단위 feature CSV/JSONL
-    # ---------------------------------------------------
-    cmd2 = [
-        py,
-        str(base_dir / "2.window_to_feature_csv.py"),
-        "--input",
-        str(pattern_windows),
-        "--pre_dir",
-        str(pre_dir),
-        "--output",
-        str(static_feature_csv),
-    ]
-    run_cmd(cmd2)
-
-    # ---------------------------------------------------
     # 3단계: 패턴 윈도우 → 고정 길이(T=max_index) 시퀀스 feature JSONL
     #      (여기서만 --max-index 를 사용자가 변경)
     # ---------------------------------------------------

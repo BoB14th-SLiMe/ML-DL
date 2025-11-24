@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-preprocess_dns_embed.py
+dns.py
 A버전: DNS 전용 feature 전처리 (dns.qc, dns.ac만 사용)
 
 두 모드 제공:
@@ -28,6 +28,9 @@ A버전: DNS 전용 feature 전처리 (dns.qc, dns.ac만 사용)
       "dns_ac_min": ...,
       "dns_ac_max": ...
     }
+
+실시간 단일 패킷 처리용:
+  - preprocess_dns_with_norm(obj, norm_params) 사용
 """
 
 import json
@@ -54,11 +57,16 @@ def parse_int_field(val: Any) -> int:
 
 
 # ---------------------------------------------
-# 한 레코드(DNS) 전처리
+# 한 레코드(DNS) 전처리 (raw 값만)
 # ---------------------------------------------
 def preprocess_dns_record(obj: Dict[str, Any]) -> Dict[str, float]:
     """
-    protocol == "dns" 인 레코드를 feature dict로 변환
+    protocol == "dns" 인 레코드를 feature dict로 변환 (정규화 전 RAW)
+    반환:
+        {
+          "dns_qc": float,
+          "dns_ac": float,
+        }
     """
     feat: Dict[str, float] = {}
 
@@ -72,6 +80,54 @@ def preprocess_dns_record(obj: Dict[str, Any]) -> Dict[str, float]:
     feat["dns_ac"] = float(ac_int)
 
     return feat
+
+
+# ---------------------------------------------
+# Min-Max 함수 (공통)
+# ---------------------------------------------
+def minmax_norm(val: float, vmin: float, vmax: float) -> float:
+    if vmax <= vmin:
+        return 0.0
+    return (val - vmin) / (vmax - vmin + 1e-9)
+
+
+# ---------------------------------------------
+# 단일 패킷 + 정규화까지 처리 (실시간/운영 용)
+# ---------------------------------------------
+def preprocess_dns_with_norm(obj: Dict[str, Any],
+                             norm_params: Dict[str, float]) -> Dict[str, float]:
+    """
+    단일 DNS 패킷 obj에 대해
+    - dns_qc / dns_ac 원본
+    - dns_qc_norm / dns_ac_norm 정규화 값
+    을 모두 포함한 dict 반환.
+
+    norm_params 예시 (dns_norm_params.json):
+        {
+          "dns_qc_min": ...,
+          "dns_qc_max": ...,
+          "dns_ac_min": ...,
+          "dns_ac_max": ...
+        }
+    """
+    raw_feat = preprocess_dns_record(obj)
+    qc = float(raw_feat.get("dns_qc", 0.0))
+    ac = float(raw_feat.get("dns_ac", 0.0))
+
+    qc_min = float(norm_params["dns_qc_min"])
+    qc_max = float(norm_params["dns_qc_max"])
+    ac_min = float(norm_params["dns_ac_min"])
+    ac_max = float(norm_params["dns_ac_max"])
+
+    qc_norm = minmax_norm(qc, qc_min, qc_max)
+    ac_norm = minmax_norm(ac, ac_min, ac_max)
+
+    return {
+        "dns_qc": qc,
+        "dns_ac": ac,
+        "dns_qc_norm": qc_norm,
+        "dns_ac_norm": ac_norm,
+    }
 
 
 # ---------------------------------------------
@@ -112,10 +168,6 @@ def fit_preprocess(input_path: Path, out_dir: Path):
     qc_min, qc_max = float(min(qc_vals)), float(max(qc_vals))
     ac_min, ac_max = float(min(ac_vals)), float(max(ac_vals))
 
-    # 0 division 방지용
-    qc_range = qc_max - qc_min if qc_max > qc_min else 1.0
-    ac_range = ac_max - ac_min if ac_max > ac_min else 1.0
-
     norm_params = {
         "dns_qc_min": qc_min,
         "dns_qc_max": qc_max,
@@ -147,8 +199,8 @@ def fit_preprocess(input_path: Path, out_dir: Path):
         qc = float(feat.get("dns_qc", 0.0))
         ac = float(feat.get("dns_ac", 0.0))
 
-        qc_norm = (qc - qc_min) / qc_range
-        ac_norm = (ac - ac_min) / ac_range
+        qc_norm = minmax_norm(qc, qc_min, qc_max)
+        ac_norm = minmax_norm(ac, ac_min, ac_max)
 
         data["dns_qc"][idx]      = qc
         data["dns_ac"][idx]      = ac
@@ -178,14 +230,6 @@ def transform_preprocess(input_path: Path, out_dir: Path):
 
     norm_params = json.loads(norm_path.read_text(encoding="utf-8"))
 
-    qc_min = float(norm_params["dns_qc_min"])
-    qc_max = float(norm_params["dns_qc_max"])
-    ac_min = float(norm_params["dns_ac_min"])
-    ac_max = float(norm_params["dns_ac_max"])
-
-    qc_range = qc_max - qc_min if qc_max > qc_min else 1.0
-    ac_range = ac_max - ac_min if ac_max > ac_min else 1.0
-
     rows: List[Dict[str, float]] = []
 
     with input_path.open("r", encoding="utf-8") as fin:
@@ -201,7 +245,7 @@ def transform_preprocess(input_path: Path, out_dir: Path):
             if obj.get("protocol") != "dns":
                 continue
 
-            feat = preprocess_dns_record(obj)
+            feat = preprocess_dns_with_norm(obj, norm_params)
             rows.append(feat)
 
     if not rows:
@@ -217,16 +261,10 @@ def transform_preprocess(input_path: Path, out_dir: Path):
     data = np.zeros(len(rows), dtype=dtype)
 
     for idx, feat in enumerate(rows):
-        qc = float(feat.get("dns_qc", 0.0))
-        ac = float(feat.get("dns_ac", 0.0))
-
-        qc_norm = (qc - qc_min) / qc_range
-        ac_norm = (ac - ac_min) / ac_range
-
-        data["dns_qc"][idx]      = qc
-        data["dns_ac"][idx]      = ac
-        data["dns_qc_norm"][idx] = qc_norm
-        data["dns_ac_norm"][idx] = ac_norm
+        data["dns_qc"][idx]      = float(feat.get("dns_qc", 0.0))
+        data["dns_ac"][idx]      = float(feat.get("dns_ac", 0.0))
+        data["dns_qc_norm"][idx] = float(feat.get("dns_qc_norm", 0.0))
+        data["dns_ac_norm"][idx] = float(feat.get("dns_ac_norm", 0.0))
 
     np.save(out_dir / "dns.npy", data)
 
@@ -274,13 +312,34 @@ if __name__ == "__main__":
         data["dns_qc_norm"],
         data["dns_ac_norm"],
     ], axis=1).astype("float32")
-"""
 
-"""
+실시간 단일 패킷 예시:
+
+    import json
+    from pathlib import Path
+    from preprocess_dns_embed import preprocess_dns_with_norm
+
+    out_dir = Path("../result/output_dns")
+    norm_params = json.loads((out_dir / "dns_norm_params.json").read_text(encoding="utf-8"))
+
+    pkt = {
+        "protocol": "dns",
+        "dns.qc": "1",
+        "dns.ac": "4",
+    }
+
+    feat = preprocess_dns_with_norm(pkt, norm_params)
+    # feat = {
+    #   "dns_qc": 1.0,
+    #   "dns_ac": 4.0,
+    #   "dns_qc_norm": ...,
+    #   "dns_ac_norm": ...,
+    # }
+
 usage:
     # 학습용 DNS 데이터에서 norm_params + feature 생성
     python dns.py --fit -i "../data/ML_DL 학습.jsonl" -o "../result/output_dns"
     
     # 이후 새 데이터에 대해 같은 norm_params로 전처리
-    python dns.py --transform -i "../data/ML_DL 학습.jsonl" -o "../result/output_dns"
+    python dns.py --transform -i "../data/테스트.jsonl" -o "../result/output_dns"
 """

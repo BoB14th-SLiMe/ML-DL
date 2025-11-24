@@ -14,11 +14,6 @@ window_to_feature_csv_dynamic_index.py
          예) max_index=30 일 때
              index = [0, 30]  → span = 30  → 제거
              index = [1, 4, 5] → span = 4  → 통과
-   - 각 윈도우 내에서
-       base_idx = min(index_list)
-       각 패킷을 pos = (orig_index - base_idx) 위치에 매핑
-       pos 가 [0, global_window_size-1] 범위 안일 때만 사용
-       비어 있는 pos 는 0-padding row로 채움
 
 2) --max-index 를 주지 않으면:
    - global_window_size =
@@ -26,20 +21,21 @@ window_to_feature_csv_dynamic_index.py
        • 만약 index 가 없으면 sequence_group 길이의 최댓값
        • 그래도 없으면 1
 
+추가 필터:
+  - index 중복 제거 (같은 index는 첫 번째 패킷만 유지) + 오름차순 정렬
+  - 중복 제거 후 index 개수가 1개인 윈도우는 제거
+
 출력:
-  - JSONL: 원본이 아니라, 각 window에 대해
+  - JSONL: 각 window에 대해
         {
           "window_id": ...,
           "pattern": ...,
-          "index": [... 원본 index ...],
+          "index": [... base_idx 기준 0부터 시작하는 index ...],
           "base_idx": ...,
           "span": ...,
-          "window_size": T,
+          "window_size": T_real,    # 실제 패킷 개수
           "sequence_group": [
              {
-               "pos": 0,
-               "orig_index": <원본 index 또는 null>,
-               "has_real_pkt": 0/1,
                "protocol": <code>,
                "delta_t": <float>,
                <FEATURE_COLUMNS ...>
@@ -68,6 +64,9 @@ PROTOCOL_MAP = {
     "dns": 8,
 }
 
+PROTOCOL_MIN = 0
+PROTOCOL_MAX = max(PROTOCOL_MAP.values())
+
 
 def protocol_to_code(p: str) -> int:
     if not p:
@@ -82,16 +81,38 @@ def load_json(path: Path) -> Dict[str, Any]:
 
 
 def minmax_norm(x: float, vmin: float, vmax: float) -> float:
-    if vmax is None or vmin is None or vmax <= vmin:
+    """
+    vmin/vmax 가 없거나 이상하면 0.0,
+    vmin == vmax 이면 (훈련 데이터가 상수였던 경우)
+      - x <= vmin → 0.0
+      - x  > vmin → 1.0 로 처리
+    그 외에는 [0, 1] 로 클램핑해서 반환
+    """
+    if vmin is None or vmax is None:
         return 0.0
-    return (x - vmin) / (vmax - vmin + 1e-9)
+
+    if vmax == vmin:
+        return 0.0 if x <= vmin else 1.0
+
+    val = (x - vmin) / (vmax - vmin + 1e-9)
+    if val < 0.0:
+        return 0.0
+    if val > 1.0:
+        return 1.0
+    return val
 
 
 def safe_int(val: Any, default: int = 0) -> int:
     try:
         if isinstance(val, list) and val:
             val = val[0]
-        return int(val)
+
+        s = str(val).strip()
+        if not s:
+            return default
+
+        # base=0 → "0x10", "010", "10" 모두 자동 처리
+        return int(s, 0)
     except Exception:
         return default
 
@@ -246,6 +267,7 @@ def build_modbus_features(
     obj: Dict[str, Any],
     norm_params: Dict[str, Any],
 ) -> Dict[str, float]:
+    # --- 기본 필드 ---
     addr = safe_int(obj.get("modbus.addr"))
     fc = safe_int(obj.get("modbus.fc"))
     qty = safe_int(obj.get("modbus.qty"))
@@ -254,6 +276,7 @@ def build_modbus_features(
     regs_addr = obj.get("modbus.regs.addr")
     regs_val = obj.get("modbus.regs.val")
 
+    # --- 기본 modbus 필드용 min/max ---
     addr_cfg = norm_params.get("modbus.addr", {})
     fc_cfg = norm_params.get("modbus.fc", {})
     qty_cfg = norm_params.get("modbus.qty", {})
@@ -273,31 +296,107 @@ def build_modbus_features(
     qty_norm = minmax_norm(float(qty), qty_min, qty_max)
     bc_norm = minmax_norm(float(bc), bc_min, bc_max)
 
+    # --- regs.* 통계 계산 (raw) ---
     addrs = _parse_int_list(regs_addr)
-    vals = _parse_int_list(regs_val)
+    vals = _parse_int_list(regs_val)  # 필요하면 float 리스트 파서로 바꿔도 OK
 
     c, amin, amax, arange = _compute_regs_addr_stats(addrs)
     vmin, vmax, vmean, vstd = _compute_regs_val_stats(vals)
+
+    # --- regs_addr.* / regs_val.* min/max 로드 ---
+    ra_count_cfg = norm_params.get("regs_addr.count", {})
+    ra_min_cfg = norm_params.get("regs_addr.min", {})
+    ra_max_cfg = norm_params.get("regs_addr.max", {})
+    ra_range_cfg = norm_params.get("regs_addr.range", {})
+
+    rv_min_cfg = norm_params.get("regs_val.min", {})
+    rv_max_cfg = norm_params.get("regs_val.max", {})
+    rv_mean_cfg = norm_params.get("regs_val.mean", {})
+    rv_std_cfg = norm_params.get("regs_val.std", {})
+
+    ra_count_min = ra_count_cfg.get("min")
+    ra_count_max = ra_count_cfg.get("max")
+    ra_min_min = ra_min_cfg.get("min")
+    ra_min_max = ra_min_cfg.get("max")
+    ra_max_min = ra_max_cfg.get("min")
+    ra_max_max = ra_max_cfg.get("max")
+    ra_range_min = ra_range_cfg.get("min")
+    ra_range_max = ra_range_cfg.get("max")
+
+    rv_min_min = rv_min_cfg.get("min")
+    rv_min_max = rv_min_cfg.get("max")
+    rv_max_min = rv_max_cfg.get("min")
+    rv_max_max = rv_max_cfg.get("max")
+    rv_mean_min = rv_mean_cfg.get("min")
+    rv_mean_max = rv_mean_cfg.get("max")
+    rv_std_min = rv_std_cfg.get("min")
+    rv_std_max = rv_std_cfg.get("max")
+
+    # --- regs.* 값들 min-max 정규화 ---
+    c_norm = minmax_norm(float(c), ra_count_min, ra_count_max)
+    amin_norm = minmax_norm(float(amin), ra_min_min, ra_min_max)
+    amax_norm = minmax_norm(float(amax), ra_max_min, ra_max_max)
+    arange_norm = minmax_norm(float(arange), ra_range_min, ra_range_max)
+
+    vmin_norm = minmax_norm(float(vmin), rv_min_min, rv_min_max)
+    vmax_norm = minmax_norm(float(vmax), rv_max_min, rv_max_max)
+    vmean_norm = minmax_norm(float(vmean), rv_mean_min, rv_mean_max)
+    vstd_norm = minmax_norm(float(vstd), rv_std_min, rv_std_max)
 
     return {
         "modbus_addr_norm": float(addr_norm),
         "modbus_fc_norm": float(fc_norm),
         "modbus_qty_norm": float(qty_norm),
         "modbus_bc_norm": float(bc_norm),
-        "modbus_regs_count": float(c),
-        "modbus_regs_addr_min": float(amin),
-        "modbus_regs_addr_max": float(amax),
-        "modbus_regs_addr_range": float(arange),
-        "modbus_regs_val_min": float(vmin),
-        "modbus_regs_val_max": float(vmax),
-        "modbus_regs_val_mean": float(vmean),
-        "modbus_regs_val_std": float(vstd),
+        "modbus_regs_count": float(c_norm),
+        "modbus_regs_addr_min": float(amin_norm),
+        "modbus_regs_addr_max": float(amax_norm),
+        "modbus_regs_addr_range": float(arange_norm),
+        "modbus_regs_val_min": float(vmin_norm),
+        "modbus_regs_val_max": float(vmax_norm),
+        "modbus_regs_val_mean": float(vmean_norm),
+        "modbus_regs_val_std": float(vstd_norm),
     }
 
 
 # ==========================
 # xgt_fen feature
 # ==========================
+XGT_NORM_FIELDS = [
+    "xgt_var_cnt",
+    "xgt_source",
+    "xgt_fenet_base",
+    "xgt_fenet_slot",
+    "xgt_cmd",
+    "xgt_dtype",
+    "xgt_blkcnt",
+    "xgt_err_code",
+    "xgt_datasize",
+    "xgt_data_len_chars",
+    "xgt_data_num_spaces",
+    "xgt_data_n_bytes",
+]
+
+
+def get_xgt_minmax(norm_params: Dict[str, Any], key: str) -> Tuple[float, float]:
+    """
+    xgt_fen_norm_params.json 에서 min/max 를 가져옴.
+    - 먼저 key 그대로 (예: "xgt_cmd")
+    - 없으면 legacy 이름 "xgt_fen.<suffix>" (예: "xgt_fen.cmd") 도 한 번 더 찾음
+    """
+    cfg = norm_params.get(key)
+    if isinstance(cfg, dict):
+        return cfg.get("min"), cfg.get("max")
+
+    # 옛날 형식: xgt_fen.cmd, xgt_fen.dtype, ...
+    if key.startswith("xgt_"):
+        suffix = key[len("xgt_"):]  # "cmd", "dtype", "source" ...
+        legacy_key = f"xgt_fen.{suffix}"
+        cfg = norm_params.get(legacy_key)
+        if isinstance(cfg, dict):
+            return cfg.get("min"), cfg.get("max")
+
+    return None, None
 
 
 def get_var_id_factory(var_map: Dict[str, int]):
@@ -335,7 +434,8 @@ def build_xgt_fen_features(
     var_map: Dict[str, int],
     norm_params: Dict[str, Any],
 ) -> Dict[str, float]:
-    feat: Dict[str, float] = {}
+    # 1) RAW feature 우선 계산
+    feat_raw: Dict[str, float] = {}
 
     source = safe_int(obj.get("xgt_fen.source"))
     datasize = safe_int(obj.get("xgt_fen.datasize"))
@@ -385,27 +485,39 @@ def build_xgt_fen_features(
         zero_ratio = float(zero_cnt) / len(bytes_list)
         bucket = float(_bucket_by_mean(mean_b))
 
-    feat["xgt_var_id"] = float(var_id)
-    feat["xgt_var_cnt"] = float(var_cnt)
-    feat["xgt_source"] = float(source)
-    feat["xgt_fenet_base"] = float(xgt_fenet_base)
-    feat["xgt_fenet_slot"] = float(xgt_fenet_slot)
-    feat["xgt_cmd"] = float(cmd)
-    feat["xgt_dtype"] = float(dtype)
-    feat["xgt_blkcnt"] = float(blkcnt)
-    feat["xgt_err_flag"] = 1.0 if (errstat != 0 or errinfo != 0) else 0.0
-    feat["xgt_err_code"] = float(errinfo)
-    feat["xgt_datasize"] = float(datasize)
-    feat["xgt_data_missing"] = float(data_missing)
-    feat["xgt_data_len_chars"] = float(data_len_chars)
-    feat["xgt_data_num_spaces"] = float(num_spaces)
-    feat["xgt_data_is_hex"] = float(is_hex)
-    feat["xgt_data_n_bytes"] = float(n_bytes)
-    feat["xgt_data_zero_ratio"] = float(zero_ratio)
-    feat["xgt_data_first_byte"] = float(first_b)
-    feat["xgt_data_last_byte"] = float(last_b)
-    feat["xgt_data_mean_byte"] = float(mean_b)
-    feat["xgt_data_bucket"] = float(bucket)
+    # RAW 채우기
+    feat_raw["xgt_var_id"] = float(var_id)  # 정규화 안 함 (ID)
+    feat_raw["xgt_var_cnt"] = float(var_cnt)
+    feat_raw["xgt_source"] = float(source)
+    feat_raw["xgt_fenet_base"] = float(xgt_fenet_base)
+    feat_raw["xgt_fenet_slot"] = float(xgt_fenet_slot)
+    feat_raw["xgt_cmd"] = float(cmd)
+    feat_raw["xgt_dtype"] = float(dtype)
+    feat_raw["xgt_blkcnt"] = float(blkcnt)
+    feat_raw["xgt_err_flag"] = 1.0 if (errstat != 0 or errinfo != 0) else 0.0
+    feat_raw["xgt_err_code"] = float(errinfo)
+    feat_raw["xgt_datasize"] = float(datasize)
+    feat_raw["xgt_data_missing"] = float(data_missing)
+    feat_raw["xgt_data_len_chars"] = float(data_len_chars)
+    feat_raw["xgt_data_num_spaces"] = float(num_spaces)
+    feat_raw["xgt_data_is_hex"] = float(is_hex)
+    feat_raw["xgt_data_n_bytes"] = float(n_bytes)
+    feat_raw["xgt_data_zero_ratio"] = float(zero_ratio)
+    feat_raw["xgt_data_first_byte"] = float(first_b)
+    feat_raw["xgt_data_last_byte"] = float(last_b)
+    feat_raw["xgt_data_mean_byte"] = float(mean_b)
+    feat_raw["xgt_data_bucket"] = float(bucket)
+
+    # 2) 정규화 적용
+    feat: Dict[str, float] = {}
+
+    for k, v in feat_raw.items():
+        if k in XGT_NORM_FIELDS:
+            vmin, vmax = get_xgt_minmax(norm_params, k)
+            feat[k] = float(minmax_norm(v, vmin, vmax))
+        else:
+            # 정규화 안 하는 필드는 raw 값 그대로
+            feat[k] = float(v)
 
     return feat
 
@@ -475,6 +587,8 @@ META_COLUMNS = [
 ]
 
 FEATURE_COLUMNS = [
+    # protocol one-hot 대신 scalar + 정규화
+    "protocol_norm",
     # common
     "src_host_id",
     "dst_host_id",
@@ -610,7 +724,7 @@ def main():
             windows.append(win_obj)
             line_cnt_raw += 1
 
-    # ----- global_window_size 결정 (span 기반 X) -----
+    # ----- global_window_size 결정 (참고용) -----
     if args.max_index is not None:
         global_window_size = args.max_index
     else:
@@ -630,31 +744,60 @@ def main():
             global_window_size = 1
 
     print(f"📦 총 윈도우 수: {len(windows)}")
-    print(f"📏 실제 사용 global_window_size (== window_size): {global_window_size}")
+    print(f"📏 span 필터 기준 global_window_size (--max-index): {global_window_size}")
 
-    # ----- JSONL 작성 -----
     # ----- JSONL 작성 -----
     with jsonl_path.open("w", encoding="utf-8") as fout_jsonl:
 
         win_cnt = 0
         skipped_by_span = 0
-        total_row_cnt = 0  # 윈도우 * window_size (정보용)
+        skipped_empty = 0
+        skipped_single_index = 0  # index 개수 1개인 윈도우 스킵 카운트
+        total_row_cnt = 0  # 실제 출력 row 수 (모든 윈도우의 실제 패킷 합)
 
         for win_obj in windows:
             window_id = win_obj.get("window_id")
             pattern = win_obj.get("pattern")
-            seq_group = win_obj.get("sequence_group", [])
-            index_list = win_obj.get("index", [])
 
+            # 1) 패킷 시퀀스 가져오기 (sequence_group / window_group / RAW fallback)
+            seq_group = win_obj.get("sequence_group")
+            if not isinstance(seq_group, list) or not seq_group:
+                seq_group = win_obj.get("window_group") or win_obj.get("RAW") or []
             if not isinstance(seq_group, list):
                 seq_group = []
+
+            # 2) index 리스트 (없으면 0..len(seq_group)-1 로 생성)
+            index_list = win_obj.get("index")
             if not isinstance(index_list, list):
                 index_list = []
+            if not index_list and seq_group:
+                index_list = list(range(len(seq_group)))
+
+            # 👉 index 중복 제거 + 오름차순 정렬 + sequence_group 재정렬
+            if index_list:
+                pair_list = list(zip(index_list, seq_group))
+                unique_map: Dict[int, Any] = {}
+                for idx, pkt in pair_list:
+                    try:
+                        idx_int = int(idx)
+                    except Exception:
+                        # 숫자로 못 바꾸면 그냥 스킵
+                        continue
+                    # 같은 index가 여러 개 있으면 첫 번째 것만 유지
+                    if idx_int not in unique_map:
+                        unique_map[idx_int] = pkt
+
+                sorted_items = sorted(unique_map.items(), key=lambda x: x[0])
+                index_list = [idx for idx, _ in sorted_items]
+                seq_group = [pkt for _, pkt in sorted_items]
+
+            # 👉 중복 제거 후 index 개수가 1개인 윈도우는 제거
+            if len(index_list) == 1:
+                skipped_single_index += 1
+                continue
 
             # ----- span 계산 및 필터링 -----
             span = None
-            idx_min = None
-            idx_max = None
             if index_list:
                 try:
                     idx_min = int(min(index_list))
@@ -664,10 +807,15 @@ def main():
                     span = None
 
             if args.max_index is not None and span is not None:
-                # span >= max_index → 제거 (JSONL에도 안 나감)
+                # span >= max_index → 제거
                 if span >= args.max_index:
                     skipped_by_span += 1
                     continue
+
+            # 실제 패킷이 하나도 없으면 스킵
+            if not seq_group:
+                skipped_empty += 1
+                continue
 
             # base_idx = min(index_list) (비어있으면 0)
             if index_list:
@@ -678,78 +826,63 @@ def main():
             else:
                 base_idx = 0
 
-            # 👉 상대 인덱스 리스트(0부터 시작) 생성
+            # 👉 상대 인덱스 리스트(0부터 시작) 생성 (이미 index_list는 정렬된 상태)
             rel_index_list: List[int] = []
             for idx in index_list:
                 try:
                     idx_int = int(idx)
                 except Exception:
-                    # 변환 안 되면 0 기준으로만 넣어도 됨 (혹은 건너뛰기)
                     continue
                 rel_index_list.append(idx_int - base_idx)
-
-            # pos -> (pkt, orig_index) 매핑
-            pos_to_info: Dict[int, Tuple[Dict[str, Any], int]] = {}
-            for pkt, orig_idx in zip(seq_group, index_list):
-                try:
-                    orig_idx_int = int(orig_idx)
-                except Exception:
-                    continue
-                pos = orig_idx_int - base_idx
-                if 0 <= pos < global_window_size and pos not in pos_to_info:
-                    pos_to_info[pos] = (pkt, orig_idx_int)
 
             # 이 윈도우의 feature 시퀀스 (JSONL용)
             seq_feature_group: List[Dict[str, Any]] = []
 
-            # 0 ~ global_window_size-1 까지 dense하게 채우기 (중간은 0-padding)
-            for pos in range(global_window_size):
-                if pos in pos_to_info:
-                    pkt, orig_idx_int = pos_to_info[pos]
-                    has_real_pkt = 1.0
-                else:
-                    pkt = {}
-                    orig_idx_int = -1
-                    has_real_pkt = 0.0
-
-                protocol_str = pkt.get("protocol", "") if has_real_pkt else ""
+            # index 기준으로 정렬하면서 feature 생성
+            # (index_list / seq_group 둘 다 이미 오름차순 정렬된 상태라 정렬은 idempotent)
+            for orig_idx, pkt in sorted(zip(index_list, seq_group), key=lambda x: int(x[0])):
+                protocol_str = pkt.get("protocol", "")
                 protocol_code = protocol_to_code(protocol_str)
-                delta_t = safe_float(pkt.get("delta_t", 0.0)) if has_real_pkt else 0.0
+                delta_t = safe_float(pkt.get("delta_t", 0.0))
 
-                # feature용 row 딕셔너리 (CSV 안 쓰지만 동일 구조 활용)
+                # feature용 row 딕셔너리
                 row: Dict[str, Any] = {col: 0.0 for col in COLUMNS}
                 row["window_id"] = window_id
                 row["pattern"] = pattern
                 row["protocol"] = float(protocol_code)
                 row["delta_t"] = float(delta_t)
 
-                if has_real_pkt:
-                    common_feat = build_common_features(
-                        pkt, common_host_map, common_norm_params
-                    )
-                    row.update(common_feat)
+                protocol_norm = minmax_norm(float(protocol_code), PROTOCOL_MIN, PROTOCOL_MAX)
+                row["protocol_norm"] = float(protocol_norm)
 
-                    if protocol_str == "s7comm":
-                        s7_feat = build_s7comm_features(pkt, s7comm_norm_params)
-                        row.update(s7_feat)
-                    elif protocol_str == "modbus":
-                        mb_feat = build_modbus_features(pkt, modbus_norm_params)
-                        row.update(mb_feat)
-                    elif protocol_str == "xgt_fen":
-                        xgt_feat = build_xgt_fen_features(
-                            pkt, xgt_var_vocab, xgt_fen_norm_params
-                        )
-                        row.update(xgt_feat)
-                    elif protocol_str == "arp":
-                        arp_feat = build_arp_features(pkt, arp_host_map)
-                        row.update(arp_feat)
-                    elif protocol_str == "dns":
-                        dns_feat = build_dns_features(pkt, dns_norm_params)
-                        row.update(dns_feat)
+                # 공통 feature
+                common_feat = build_common_features(
+                    pkt, common_host_map, common_norm_params
+                )
+                row.update(common_feat)
+
+                # 프로토콜별 feature
+                if protocol_str == "s7comm":
+                    s7_feat = build_s7comm_features(pkt, s7comm_norm_params)
+                    row.update(s7_feat)
+                elif protocol_str == "modbus":
+                    mb_feat = build_modbus_features(pkt, modbus_norm_params)
+                    row.update(mb_feat)
+                elif protocol_str == "xgt_fen":
+                    xgt_feat = build_xgt_fen_features(
+                        pkt, xgt_var_vocab, xgt_fen_norm_params
+                    )
+                    row.update(xgt_feat)
+                elif protocol_str == "arp":
+                    arp_feat = build_arp_features(pkt, arp_host_map)
+                    row.update(arp_feat)
+                elif protocol_str == "dns":
+                    dns_feat = build_dns_features(pkt, dns_norm_params)
+                    row.update(dns_feat)
 
                 total_row_cnt += 1
 
-                # JSONL 용 feature만 추출 (pos, orig_index, has_real_pkt 제거)
+                # JSONL 용 feature만 추출
                 pkt_feat: Dict[str, Any] = {
                     "protocol": float(protocol_code),
                     "delta_t": float(delta_t),
@@ -758,15 +891,17 @@ def main():
                     pkt_feat[k] = row[k]
                 seq_feature_group.append(pkt_feat)
 
+            window_size_real = len(seq_feature_group)
+
             # JSONL 출력 (원본 패킷 X, feature 시퀀스만)
             out_obj = {
                 "window_id": window_id,
                 "pattern": pattern,
-                "orig_index": index_list,      # 원본 index 그대로
-                "index": rel_index_list,       # ✅ base_idx 기준 0부터 시작하는 index
+                "orig_index": index_list,   # 이제는 중복 제거 + 오름차순 index
+                "index": rel_index_list,    # base_idx 기준 0부터 시작하는 index
                 "base_idx": base_idx,
                 "span": span,
-                "window_size": global_window_size,
+                "window_size": window_size_real,  # 실제 패킷 개수
                 "sequence_group": seq_feature_group,
             }
             fout_jsonl.write(json.dumps(out_obj, ensure_ascii=False) + "\n")
@@ -775,8 +910,10 @@ def main():
     print(f"✅ 완료: 원본 {line_cnt_raw}개 라인 / {win_cnt}개 윈도우 처리")
     if args.max_index is not None:
         print(f"   ↳ span >= {args.max_index} 조건으로 스킵된 윈도우 수: {skipped_by_span}")
-    print(f"→ window 당 길이(global_window_size): {global_window_size}")
-    print(f"→ 총 row 수(윈도우 * window_size): {total_row_cnt}")
+    print(f"   ↳ index 개수 == 1 이라 스킵된 윈도우 수: {skipped_single_index}")
+    print(f"   ↳ 유효 패킷이 없어 스킵된 윈도우 수: {skipped_empty}")
+    print(f"→ span 기준 global_window_size(--max-index 또는 자동): {global_window_size}")
+    print(f"→ 총 row 수(실제 패킷 수 합): {total_row_cnt}")
     print(f"→ JSONL: {jsonl_path}")
 
 
@@ -784,6 +921,10 @@ if __name__ == "__main__":
     main()
 
 """
-python 3.window_to_feature_csv_dynamic_index.py --input "../data/pattern_windows.jsonl" --pre_dir "../result" --output "../../train/data/pattern_features.csv" --max-index 8
-
+예시:
+python 3.window_to_feature_csv_dynamic_index.py \
+  --input "../data/pattern_windows.jsonl" \
+  --pre_dir "../result" \
+  --output "../../train/data/pattern_features.csv" \
+  --max-index 8
 """

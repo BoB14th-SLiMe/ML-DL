@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-preprocess_arp_embed.py
+arp.py
 A버전: ARP 전용 embedding/feature 전처리 (초미니멀 버전)
 
-두 모드 제공:
+세 모드 제공:
   --fit        : arp_host_map 생성 후 arp.npy 저장
-  --transform  : 기존 arp_host_map 사용
+  --transform  : 기존 arp_host_map 사용하여 다수 패킷 JSONL 전처리
+  --single     : 기존 arp_host_map 사용하여 단일 패킷 전처리 (JSON / JSONL)
 
 입력 JSONL에서 사용하는 필드:
   - protocol == "arp"
@@ -20,7 +21,11 @@ A버전: ARP 전용 embedding/feature 전처리 (초미니멀 버전)
 출력 feature (arp.npy, structured numpy):
   - arp_src_host_id   (int32)   ← (smac, sip) 조합 → ID, Embedding용
   - arp_tgt_host_id   (int32)   ← (arp.tmac, arp.tip) 조합 → ID, Embedding용
-  - arp_op_num       (float32) ← op 원본 값 (0, 1, 2)  # 1=request, 2=reply
+  - arp_op_num        (float32) ← op 원본 값 (0, 1, 2)  # 1=request, 2=reply
+
+단일 패킷 모드(--single)의 출력:
+  - stdout 에 JSON 한 줄:
+    {"arp_src_host_id": ..., "arp_tgt_host_id": ..., "arp_op_num": ...}
 """
 
 import json
@@ -171,7 +176,7 @@ def fit_preprocess(input_path: Path, out_dir: Path):
 
 
 # ---------------------------------------------
-# TRANSFORM
+# TRANSFORM (다수 패킷)
 # ---------------------------------------------
 def transform_preprocess(input_path: Path, out_dir: Path):
 
@@ -220,6 +225,65 @@ def transform_preprocess(input_path: Path, out_dir: Path):
 
 
 # ---------------------------------------------
+# SINGLE (단일 패킷)
+# ---------------------------------------------
+def single_preprocess(input_path: Path, out_dir: Path):
+    """
+    - input_path: 단일 패킷 JSON 또는 JSONL 파일
+    - out_dir: 기존 arp_host_map.json 이 있는 디렉토리
+    stdout 으로 feature JSON 한 줄 출력
+    """
+    host_map_path = out_dir / "arp_host_map.json"
+    if not host_map_path.exists():
+        raise FileNotFoundError(f"❌ {host_map_path} 가 없습니다. 먼저 --fit 을 실행하세요.")
+
+    host_map = json.loads(host_map_path.read_text(encoding="utf-8"))
+    get_host_id = get_host_id_factory(host_map)
+
+    text = input_path.read_text(encoding="utf-8").strip()
+    if not text:
+        raise ValueError("❌ 입력 파일이 비어 있습니다.")
+
+    obj = None
+
+    # 1) 전체를 하나의 JSON 객체/리스트로 가정하고 시도
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, dict) and parsed.get("protocol") == "arp":
+        obj = parsed
+    elif isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, dict) and item.get("protocol") == "arp":
+                obj = item
+                break
+
+    # 2) 실패하면 JSONL 로 가정하고 첫 번째 ARP 패킷 찾기
+    if obj is None:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                cand = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(cand, dict) and cand.get("protocol") == "arp":
+                obj = cand
+                break
+
+    if obj is None:
+        raise ValueError("❌ 입력에서 protocol=='arp' 인 패킷을 찾지 못했습니다.")
+
+    feat = preprocess_arp_record(obj, get_host_id)
+
+    # 단일 패킷은 numpy 저장 대신, feature JSON을 stdout에 출력
+    print(json.dumps(feat, ensure_ascii=False))
+
+
+# ---------------------------------------------
 # MAIN
 # ---------------------------------------------
 if __name__ == "__main__":
@@ -228,17 +292,23 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", required=True)
     parser.add_argument("--fit", action="store_true")
     parser.add_argument("--transform", action="store_true")
+    parser.add_argument("--single", action="store_true", help="단일 ARP 패킷 전처리")
 
     args = parser.parse_args()
     input_path = Path(args.input)
     out_dir = Path(args.output)
 
+    # 모드 선택 검증
+    mode_flags = [args.fit, args.transform, args.single]
+    if sum(1 for m in mode_flags if m) != 1:
+        raise ValueError("❌ --fit / --transform / --single 중 하나만 선택하세요.")
+
     if args.fit:
         fit_preprocess(input_path, out_dir)
     elif args.transform:
         transform_preprocess(input_path, out_dir)
-    else:
-        raise ValueError("❌ 반드시 --fit 또는 --transform 중 하나를 선택하세요.")
+    elif args.single:
+        single_preprocess(input_path, out_dir)
 
 
 """
@@ -258,9 +328,16 @@ if __name__ == "__main__":
 
 """
 usage:
-    # 학습용 ARP 데이터에서 host_map + feature 생성
-    python arp.py --fit -i "../data/ML_DL 학습.jsonl" -o "../result/output_arp"
-    
-    # 이후 새 데이터에 대해 같은 host_map으로 전처리
-    python arp.py --transform -i "../data/ML_DL 학습.jsonl" -o "../result/output_arp"
+    # 1) 학습용 ARP 데이터에서 host_map + feature 생성
+    python arp.py --fit -i "../data/ML_DL_학습.jsonl" -o "../result/output_arp"
+
+    # 2) 같은 host_map으로 다수 패킷 전처리
+    python arp.py --transform -i "../data/새로운_arp_로그.jsonl" -o "../result/output_arp"
+
+    # 3) 단일 패킷 전처리 (JSON 또는 JSONL에서 첫 번째 ARP 패킷 사용)
+    python arp.py --single -i "./one_arp_packet.json" -o "../result/output_arp"
+
+    # 출력:
+    # {"arp_src_host_id": 3, "arp_tgt_host_id": 7, "arp_op_num": 1.0}
 """
+

@@ -12,12 +12,13 @@ A버전: xgt_fen 전용 embedding/feature 전처리 + 간단 정규화
 입력 JSONL에서 사용하는 필드:
   - protocol == "xgt_fen"
   - xgt_fen.vars      : list[str] 또는 "R17,R20" 같은 str
-  - xgt_fen.source    : int
-  - xgt_fen.fenetpos  : int (상위 4bit = base, 하위 4bit = slot)
-  - xgt_fen.cmd       : int
-  - xgt_fen.dtype     : int (또는 xgt_fen.dype)
+  - xgt_fen.source    : int 또는 "0x11" 같은 hex 문자열
+  - xgt_fen.fenetpos  : int 또는 "0x01" 같은 hex 문자열 (상위 4bit = base, 하위 4bit = slot)
+  - xgt_fen.cmd       : int 또는 "0x0054" 같은 hex 문자열
+  - xgt_fen.dtype     : int 또는 "0x0014" (또는 xgt_fen.dype)
   - xgt_fen.blkcnt    : int
   - xgt_fen.datasize  : int
+  - xgt_fen.errstat   : int 또는 "0x0000" 같은 hex 문자열
   - xgt_fen.data      : list[str] 또는 str (hex string)
 
 출력:
@@ -47,6 +48,10 @@ xgt_fen.npy dtype (각 필드는 이미 아래 규칙대로 스케일링됨):
   - xgt_data_last_byte (float32) (0~1, 원래 0~255를 /255.0)
   - xgt_data_mean_byte (float32) (0~1, 원래 0~255를 /255.0)
   - xgt_data_bucket    (float32) (hash bucket, 정규화 X)
+
+실시간 / 단일 패킷 처리:
+  - xgt_var_vocab.json, xgt_fen_norm_params.json 로드 후
+    preprocess_xgt_fen_with_norm(obj, var_map, norm_params) 호출
 """
 
 import json
@@ -121,6 +126,32 @@ def get_var_id_factory(var_map: Dict[str, int]):
         return var_map[var_name]
 
     return get_var_id
+
+
+# ---------------------------------------------
+# 안전한 int 변환 (10진수 + 16진수 "0x.." 모두 지원)
+# ---------------------------------------------
+def to_int(value: Any, default: int = 0) -> int:
+    """
+    "10", 10, "0x10" 같은 값들을 모두 int로 변환.
+    - "0x.." 형태면 16진수로 인식
+    - 그 외는 10진수 시도
+    """
+    if value is None:
+        return default
+
+    s = str(value).strip()
+    if not s:
+        return default
+
+    try:
+        # "0x10" 같이 base 자동 인식
+        return int(s, 0)
+    except ValueError:
+        try:
+            return int(s)
+        except ValueError:
+            return default
 
 
 # ---------------------------------------------
@@ -241,26 +272,22 @@ def preprocess_xgt_record(obj: Dict[str, Any], get_var_id) -> Dict[str, float]:
         first_var = ""
         var_cnt = 0
 
-    # ★ 여기서부터 int로 유지
     var_id = get_var_id(first_var) if first_var else 0
     feat["xgt_var_id"] = int(var_id)      # 저장도 int, dtype도 int32
     feat["xgt_var_cnt"] = float(var_cnt)
 
-    # 2) 헤더/명령 필드
-    def to_int(value: Any, default: int = 0) -> int:
-        if value is None:
-            return default
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return default
-
+    # 2) 헤더/명령 필드 + errstat 처리
     source = to_int(obj.get("xgt_fen.source"))
     fenetpos = to_int(obj.get("xgt_fen.fenetpos"))
     cmd = to_int(obj.get("xgt_fen.cmd"))
     dtype = to_int(obj.get("xgt_fen.dtype") or obj.get("xgt_fen.dype"))
     blkcnt = to_int(obj.get("xgt_fen.blkcnt"))
     datasize = to_int(obj.get("xgt_fen.datasize"))
+
+    # errstat → 에러 코드 / 플래그
+    errstat_raw = obj.get("xgt_fen.errstat")
+    err_code = to_int(errstat_raw)
+    err_flag = 1.0 if err_code != 0 else 0.0
 
     base = (fenetpos >> 4) & 0x0F
     slot = fenetpos & 0x0F
@@ -272,6 +299,9 @@ def preprocess_xgt_record(obj: Dict[str, Any], get_var_id) -> Dict[str, float]:
     feat["xgt_dtype"] = float(dtype)
     feat["xgt_blkcnt"] = float(blkcnt)
     feat["xgt_datasize"] = float(datasize)
+
+    feat["xgt_err_code"] = float(err_code)
+    feat["xgt_err_flag"] = float(err_flag)
 
     # 3) data 요약
     data_field = obj.get("xgt_fen.data")
@@ -297,6 +327,73 @@ def minmax_norm(val: float, vmin: float, vmax: float) -> float:
 
 
 # ---------------------------------------------
+# RAW feature → 정규화 feature로 변환 (공통 로직)
+# ---------------------------------------------
+def apply_norm_to_xgt_feat(raw_feat: Dict[str, float],
+                           norm_params: Dict[str, Dict[str, float]]) -> Dict[str, float]:
+    """
+    raw_feat: preprocess_xgt_record() 결과 (raw 값)
+    norm_params: xgt_fen_norm_params.json 내용
+    """
+    feat: Dict[str, float] = {}
+
+    # 1) ID는 그대로
+    feat["xgt_var_id"] = int(raw_feat.get("xgt_var_id", 0))
+
+    # 2) Min-Max 정규화 대상
+    for f in NORM_FIELDS:
+        raw_v = float(raw_feat.get(f, 0.0))
+        p = norm_params.get(f, {})
+        vmin = float(p.get("min", 0.0))
+        vmax = float(p.get("max", 1.0))
+        feat[f] = float(minmax_norm(raw_v, vmin, vmax))
+
+    # 3) 플래그/ratio/bucket 등 그대로 사용
+    feat["xgt_err_flag"]       = float(raw_feat.get("xgt_err_flag", 0.0))
+    feat["xgt_data_missing"]   = float(raw_feat.get("xgt_data_missing", 0.0))
+    feat["xgt_data_is_hex"]    = float(raw_feat.get("xgt_data_is_hex", 0.0))
+    feat["xgt_data_zero_ratio"]= float(raw_feat.get("xgt_data_zero_ratio", 0.0))
+    feat["xgt_data_bucket"]    = float(raw_feat.get("xgt_data_bucket", 0.0))
+
+    # 4) 바이트 값 → 0~1 스케일 (/255)
+    fb = float(raw_feat.get("xgt_data_first_byte", 0.0))
+    lb = float(raw_feat.get("xgt_data_last_byte", 0.0))
+    mb = float(raw_feat.get("xgt_data_mean_byte", 0.0))
+
+    feat["xgt_data_first_byte"] = fb / 255.0
+    feat["xgt_data_last_byte"]  = lb / 255.0
+    feat["xgt_data_mean_byte"]  = mb / 255.0
+
+    return feat
+
+
+# ---------------------------------------------
+# 단일 패킷 + 정규화까지 처리 (실시간/운영 용)
+# ---------------------------------------------
+def preprocess_xgt_fen_with_norm(
+    obj: Dict[str, Any],
+    var_map: Dict[str, int],
+    norm_params: Dict[str, Dict[str, float]],
+) -> Dict[str, float]:
+    """
+    단일 xgt_fen 패킷 obj에 대해
+    - xgt_var_id (int)
+    - 나머지 numeric feature (정규화 포함)
+    를 모두 담은 dict 반환.
+
+    사용 예:
+        var_map = json.loads(open("xgt_var_vocab.json","r",encoding="utf-8").read())
+        norm_params = json.loads(open("xgt_fen_norm_params.json","r",encoding="utf-8").read())
+
+        feat = preprocess_xgt_fen_with_norm(obj, var_map, norm_params)
+    """
+    get_var_id = get_var_id_factory(var_map)
+    raw_feat = preprocess_xgt_record(obj, get_var_id)
+    norm_feat = apply_norm_to_xgt_feat(raw_feat, norm_params)
+    return norm_feat
+
+
+# ---------------------------------------------
 # FIT
 # ---------------------------------------------
 def fit_preprocess(input_path: Path, out_dir: Path):
@@ -306,7 +403,7 @@ def fit_preprocess(input_path: Path, out_dir: Path):
     var_map: Dict[str, int] = {}
     get_var_id = get_var_id_factory(var_map)
 
-    rows: List[Dict[str, float]] = []
+    rows_raw: List[Dict[str, float]] = []
 
     with input_path.open("r", encoding="utf-8") as fin:
         for line in fin:
@@ -322,7 +419,7 @@ def fit_preprocess(input_path: Path, out_dir: Path):
                 continue
 
             feat = preprocess_xgt_record(obj, get_var_id)
-            rows.append(feat)
+            rows_raw.append(feat)
 
     # vocab 저장
     (out_dir / "xgt_var_vocab.json").write_text(
@@ -339,7 +436,7 @@ def fit_preprocess(input_path: Path, out_dir: Path):
         f: {"min": None, "max": None} for f in NORM_FIELDS
     }
 
-    for feat in rows:
+    for feat in rows_raw:
         for f in NORM_FIELDS:
             v = float(feat.get(f, 0.0))
             if norm_params[f]["min"] is None or v < norm_params[f]["min"]:
@@ -387,41 +484,12 @@ def fit_preprocess(input_path: Path, out_dir: Path):
         ("xgt_data_bucket", "f4"),
     ])
 
-    data = np.zeros(len(rows), dtype=dtype)
+    data = np.zeros(len(rows_raw), dtype=dtype)
 
-    for idx, feat in enumerate(rows):
-        # 1) ID (정규화 X)
-        data["xgt_var_id"][idx] = int(feat.get("xgt_var_id", 0))
-
-        # 2) Min-Max 정규화 대상
-        for f in NORM_FIELDS:
-            raw_v = float(feat.get(f, 0.0))
-            vmin = norm_params[f]["min"]
-            vmax = norm_params[f]["max"]
-            norm_v = minmax_norm(raw_v, vmin, vmax)
-            data[f][idx] = float(norm_v)
-
-        # 3) 그대로 쓰는 값들 (flag / ratio / bucket 등)
-        data["xgt_err_flag"][idx]       = float(feat.get("xgt_err_flag", 0.0))
-        # xgt_err_code는 이미 위에서 Min-Max 정규화로 채워짐
-        # xgt_datasize도 이미 위에서 Min-Max 정규화로 채워짐
-        data["xgt_data_missing"][idx]   = float(feat.get("xgt_data_missing", 0.0))
-        # xgt_data_len_chars, xgt_data_num_spaces, xgt_data_n_bytes
-        # -> 위에서 Min-Max 정규화됨
-        data["xgt_data_is_hex"][idx]    = float(feat.get("xgt_data_is_hex", 0.0))
-        data["xgt_data_zero_ratio"][idx]= float(feat.get("xgt_data_zero_ratio", 0.0))
-
-        # 4) 바이트 값들은 0~1 스케일 (/255)
-        fb = float(feat.get("xgt_data_first_byte", 0.0))
-        lb = float(feat.get("xgt_data_last_byte", 0.0))
-        mb = float(feat.get("xgt_data_mean_byte", 0.0))
-
-        data["xgt_data_first_byte"][idx] = fb / 255.0
-        data["xgt_data_last_byte"][idx]  = lb / 255.0
-        data["xgt_data_mean_byte"][idx]  = mb / 255.0
-
-        # 5) bucket (정규화 X)
-        data["xgt_data_bucket"][idx]    = float(feat.get("xgt_data_bucket", 0.0))
+    for idx, raw_feat in enumerate(rows_raw):
+        norm_feat = apply_norm_to_xgt_feat(raw_feat, norm_params)
+        for name in data.dtype.names:
+            data[name][idx] = norm_feat.get(name, 0.0)
 
     np.save(out_dir / "xgt_fen.npy", data)
 
@@ -453,7 +521,7 @@ def transform_preprocess(input_path: Path, out_dir: Path):
 
     get_var_id = get_var_id_factory(var_map)
 
-    rows: List[Dict[str, float]] = []
+    rows_norm: List[Dict[str, float]] = []
 
     with input_path.open("r", encoding="utf-8") as fin:
         for line in fin:
@@ -468,8 +536,9 @@ def transform_preprocess(input_path: Path, out_dir: Path):
             if obj.get("protocol") != "xgt_fen":
                 continue
 
-            feat = preprocess_xgt_record(obj, get_var_id)
-            rows.append(feat)
+            raw_feat = preprocess_xgt_record(obj, get_var_id)
+            norm_feat = apply_norm_to_xgt_feat(raw_feat, norm_params)
+            rows_norm.append(norm_feat)
 
     dtype = np.dtype([
         ("xgt_var_id", "i4"),
@@ -495,35 +564,11 @@ def transform_preprocess(input_path: Path, out_dir: Path):
         ("xgt_data_bucket", "f4"),
     ])
 
-    data = np.zeros(len(rows), dtype=dtype)
+    data = np.zeros(len(rows_norm), dtype=dtype)
 
-    for idx, feat in enumerate(rows):
-        data["xgt_var_id"][idx] = int(feat.get("xgt_var_id", 0))
-
-        # Min-Max 정규화 대상
-        for f in NORM_FIELDS:
-            raw_v = float(feat.get(f, 0.0))
-            vmin = norm_params[f]["min"]
-            vmax = norm_params[f]["max"]
-            norm_v = minmax_norm(raw_v, vmin, vmax)
-            data[f][idx] = float(norm_v)
-
-        # 그대로 쓰는 값
-        data["xgt_err_flag"][idx]       = float(feat.get("xgt_err_flag", 0.0))
-        data["xgt_data_missing"][idx]   = float(feat.get("xgt_data_missing", 0.0))
-        data["xgt_data_is_hex"][idx]    = float(feat.get("xgt_data_is_hex", 0.0))
-        data["xgt_data_zero_ratio"][idx]= float(feat.get("xgt_data_zero_ratio", 0.0))
-
-        # 바이트 값 → /255
-        fb = float(feat.get("xgt_data_first_byte", 0.0))
-        lb = float(feat.get("xgt_data_last_byte", 0.0))
-        mb = float(feat.get("xgt_data_mean_byte", 0.0))
-
-        data["xgt_data_first_byte"][idx] = fb / 255.0
-        data["xgt_data_last_byte"][idx]  = lb / 255.0
-        data["xgt_data_mean_byte"][idx]  = mb / 255.0
-
-        data["xgt_data_bucket"][idx]    = float(feat.get("xgt_data_bucket", 0.0))
+    for idx, feat in enumerate(rows_norm):
+        for name in data.dtype.names:
+            data[name][idx] = feat.get(name, 0.0)
 
     np.save(out_dir / "xgt_fen.npy", data)
 
@@ -545,12 +590,15 @@ if __name__ == "__main__":
     input_path = Path(args.input)
     out_dir = Path(args.output)
 
+    if args.fit and args.transform:
+        raise ValueError("❌ --fit 과 --transform 는 동시에 사용할 수 없습니다.")
+    if not args.fit and not args.transform:
+        raise ValueError("❌ 반드시 --fit 또는 --transform 중 하나를 선택하세요.")
+
     if args.fit:
         fit_preprocess(input_path, out_dir)
-    elif args.transform:
-        transform_preprocess(input_path, out_dir)
     else:
-        raise ValueError("❌ 반드시 --fit 또는 --transform 중 하나를 선택하세요.")
+        transform_preprocess(input_path, out_dir)
 
 
 """
@@ -586,14 +634,38 @@ if __name__ == "__main__":
         data["xgt_data_mean_byte"], # 0~1
         data["xgt_data_bucket"],    # hash bucket (정규화 X, 필요하면 별도 embedding 사용)
     ], axis=1).astype("float32")
-"""
 
 
-"""
+실시간 단일 패킷 예시:
+
+    import json
+    from pathlib import Path
+    from preprocess_xgt_fen_embed import preprocess_xgt_fen_with_norm
+
+    out_dir = Path("../result/output_xgt_fen")
+    var_map = json.loads((out_dir / "xgt_var_vocab.json").read_text(encoding="utf-8"))
+    norm_params = json.loads((out_dir / "xgt_fen_norm_params.json").read_text(encoding="utf-8"))
+
+    pkt = {
+        "protocol": "xgt_fen",
+        "xgt_fen.source": "0x33",
+        "xgt_fen.fenetpos": "0x00",
+        "xgt_fen.cmd": "0x0054",
+        "xgt_fen.dtype": "0x0014",
+        "xgt_fen.blkcnt": "1",
+        "xgt_fen.errstat": "0x0000",
+        "xgt_fen.vars": "%DB001046",
+        "xgt_fen.datasize": "12",
+        "xgt_fen.data": "05001e00f50000001c002700",
+    }
+
+    feat = preprocess_xgt_fen_with_norm(pkt, var_map, norm_params)
+    # feat dict를 그대로 모델 입력용 벡터로 변환해서 사용 가능
+
 usage:
     # 학습 데이터 기준 vocab + feature 생성
-    python xgt-fen.py --fit -i "../data/ML_DL 학습.jsonl" -o "../result/output_xgt_fen"
+    python preprocess_xgt_fen_embed.py --fit -i "../data/ML_DL 학습.jsonl" -o "../result/output_xgt_fen"
 
     # 새 데이터(테스트/운영) 전처리
-    python xgt-fen.py --transform -i "../data/ML_DL 학습.jsonl" -o "../result/output_xgt_fen"
+    python preprocess_xgt_fen_embed.py --transform -i "../data/ML_DL 학습.jsonl" -o "../result/output_xgt_fen"
 """

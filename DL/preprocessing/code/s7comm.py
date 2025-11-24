@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-preprocess_s7comm_feat.py
-s7comm 전용 feature 전처리 (ARP 버전 참고)
+s7comm.py
+s7comm 전용 feature 전처리 (ARP / modbus 버전 스타일)
 
 두 모드 제공:
   --fit        : min-max 정규화 파라미터 생성 + s7comm.npy 저장
@@ -11,14 +11,14 @@ s7comm 전용 feature 전처리 (ARP 버전 참고)
 
 입력 JSONL에서 사용하는 필드:
   - protocol == "s7comm"
-  - s7comm.ros    : 1 또는 3 (min-max 정규화)
-  - s7comm.fn     : 기능 코드 (int로 변환만, 정규화 X)
+  - s7comm.ros    : 1 또는 3 (int/str/["1"] 등 → min-max 정규화)
+  - s7comm.fn     : 기능 코드 (10진/16진 "0x04" → int 변환만, 정규화 X)
   - s7comm.db     : 데이터 블록 번호 (int → min-max 정규화)
   - s7comm.addr   : 레지스터 주소 (int → min-max 정규화)
 
 출력 feature (s7comm.npy, structured numpy):
   - s7comm_ros_norm    (float32)  ← s7comm.ros min-max 정규화
-  - s7comm_fn          (float32)  ← s7comm.fn 정수값 (그대로)
+  - s7comm_fn          (float32)  ← s7comm.fn 정수값 (그대로, 정규화 X)
   - s7comm_db_norm     (float32)  ← s7comm.db min-max 정규화
   - s7comm_addr_norm   (float32)  ← s7comm.addr min-max 정규화
 
@@ -29,6 +29,10 @@ s7comm 전용 feature 전처리 (ARP 버전 참고)
         "s7comm.db":   {"min": ..., "max": ...},
         "s7comm.addr": {"min": ..., "max": ...}
       }
+
+실시간 / 단일 패킷 처리:
+  - s7comm_norm_params.json 로드 후
+    preprocess_s7comm_with_norm(obj, norm_params) 호출
 """
 
 import json
@@ -46,8 +50,10 @@ def parse_int_field(val: Any) -> Optional[int]:
     JSONL에서 들어오는 값이
       - 10
       - "10"
+      - "0x04"
       - [10]
       - ["10"]
+      - ["0x04"]
     등일 수 있으므로 통일해서 int로 변환.
     변환 실패 시 None 반환.
     """
@@ -55,10 +61,19 @@ def parse_int_field(val: Any) -> Optional[int]:
         val = val[0]
     if val is None:
         return None
-    try:
-        return int(val)
-    except (TypeError, ValueError):
+
+    s = str(val).strip()
+    if not s:
         return None
+
+    # 0x.., 0X.. 포함해서 자동 인식
+    try:
+        return int(s, 0)
+    except (TypeError, ValueError):
+        try:
+            return int(s)
+        except (TypeError, ValueError):
+            return None
 
 
 def minmax_norm(v: Optional[int], vmin: Optional[int], vmax: Optional[int]) -> float:
@@ -107,6 +122,51 @@ def extract_s7comm_raw(obj: Dict[str, Any]) -> Optional[Dict[str, Optional[int]]
         "db": db,
         "addr": addr,
     }
+
+
+# ---------------------------------------------
+# 단일 패킷 + 정규화까지 처리 (실시간/운영 용)
+# ---------------------------------------------
+def preprocess_s7comm_with_norm(obj: Dict[str, Any],
+                                norm_params: Dict[str, Any]) -> Optional[Dict[str, float]]:
+    """
+    단일 s7comm 패킷 obj에 대해
+    - s7comm_ros_norm
+    - s7comm_fn
+    - s7comm_db_norm
+    - s7comm_addr_norm
+    4개 feature를 모두 정규화된 값(0~1)으로 담은 dict 반환.
+
+    norm_params 예시 (s7comm_norm_params.json):
+        {
+          "s7comm.ros":  {"min": ..., "max": ...},
+          "s7comm.db":   {"min": ..., "max": ...},
+          "s7comm.addr": {"min": ..., "max": ...}
+        }
+    """
+    raw = extract_s7comm_raw(obj)
+    if raw is None:
+        return None
+
+    ros = raw["ros"]
+    fn = raw["fn"]
+    db = raw["db"]
+    addr = raw["addr"]
+
+    ros_min = norm_params.get("s7comm.ros", {}).get("min")
+    ros_max = norm_params.get("s7comm.ros", {}).get("max")
+    db_min = norm_params.get("s7comm.db", {}).get("min")
+    db_max = norm_params.get("s7comm.db", {}).get("max")
+    addr_min = norm_params.get("s7comm.addr", {}).get("min")
+    addr_max = norm_params.get("s7comm.addr", {}).get("max")
+
+    feat: Dict[str, float] = {
+        "s7comm_ros_norm": minmax_norm(ros, ros_min, ros_max),
+        "s7comm_fn": float(fn if fn is not None else 0.0),
+        "s7comm_db_norm": minmax_norm(db, db_min, db_max),
+        "s7comm_addr_norm": minmax_norm(addr, addr_min, addr_max),
+    }
+    return feat
 
 
 # ---------------------------------------------
@@ -225,13 +285,6 @@ def transform_preprocess(input_path: Path, out_dir: Path):
 
     norm_params = json.loads(norm_path.read_text(encoding="utf-8"))
 
-    ros_min = norm_params.get("s7comm.ros", {}).get("min")
-    ros_max = norm_params.get("s7comm.ros", {}).get("max")
-    db_min = norm_params.get("s7comm.db", {}).get("min")
-    db_max = norm_params.get("s7comm.db", {}).get("max")
-    addr_min = norm_params.get("s7comm.addr", {}).get("min")
-    addr_max = norm_params.get("s7comm.addr", {}).get("max")
-
     rows_norm: List[Dict[str, float]] = []
 
     with input_path.open("r", encoding="utf-8") as fin:
@@ -247,21 +300,10 @@ def transform_preprocess(input_path: Path, out_dir: Path):
             if obj.get("protocol") != "s7comm":
                 continue
 
-            raw = extract_s7comm_raw(obj)
-            if raw is None:
+            feat = preprocess_s7comm_with_norm(obj, norm_params)
+            if feat is None:
                 continue
 
-            ros = raw["ros"]
-            fn = raw["fn"]
-            db = raw["db"]
-            addr = raw["addr"]
-
-            feat = {
-                "s7comm_ros_norm": minmax_norm(ros, ros_min, ros_max),
-                "s7comm_fn": float(fn if fn is not None else 0.0),
-                "s7comm_db_norm": minmax_norm(db, db_min, db_max),
-                "s7comm_addr_norm": minmax_norm(addr, addr_min, addr_max),
-            }
             rows_norm.append(feat)
 
     dtype = np.dtype([
@@ -270,6 +312,14 @@ def transform_preprocess(input_path: Path, out_dir: Path):
         ("s7comm_db_norm", "f4"),
         ("s7comm_addr_norm", "f4"),
     ])
+
+    if not rows_norm:
+        # 비어 있는 경우에도 빈 npy는 만들어 두자
+        data_empty = np.zeros(0, dtype=dtype)
+        np.save(out_dir / "s7comm.npy", data_empty)
+        print("✅ TRANSFORM 완료 (empty)")
+        print(f"- s7comm.npy 저장: {out_dir/'s7comm.npy'} shape={data_empty.shape}")
+        return
 
     data = np.zeros(len(rows_norm), dtype=dtype)
 
@@ -300,12 +350,15 @@ if __name__ == "__main__":
     input_path = Path(args.input)
     out_dir = Path(args.output)
 
+    if args.fit and args.transform:
+        raise ValueError("❌ --fit 과 --transform 는 동시에 사용할 수 없습니다.")
+    if not args.fit and not args.transform:
+        raise ValueError("❌ 반드시 --fit 또는 --transform 중 하나를 선택하세요.")
+
     if args.fit:
         fit_preprocess(input_path, out_dir)
-    elif args.transform:
-        transform_preprocess(input_path, out_dir)
     else:
-        raise ValueError("❌ 반드시 --fit 또는 --transform 중 하나를 선택하세요.")
+        transform_preprocess(input_path, out_dir)
 
 
 """
@@ -315,15 +368,39 @@ if __name__ == "__main__":
     data = np.load("../result/output_s7comm/s7comm.npy")
 
     # shape: (N, )
-    ros = data["s7comm_ros_norm"].astype("float32")
-    fn  = data["s7comm_fn"].astype("float32")
-    db  = data["s7comm_db_norm"].astype("float32")
+    ros  = data["s7comm_ros_norm"].astype("float32")
+    fn   = data["s7comm_fn"].astype("float32")
+    db   = data["s7comm_db_norm"].astype("float32")
     addr = data["s7comm_addr_norm"].astype("float32")
 
     features = np.stack([ros, fn, db, addr], axis=1).astype("float32")
-"""
 
-"""
+
+실시간 단일 패킷 예시:
+
+    import json
+    from pathlib import Path
+    from preprocess_s7comm_feat import preprocess_s7comm_with_norm
+
+    out_dir = Path("../result/output_s7comm")
+    norm_params = json.loads((out_dir / "s7comm_norm_params.json").read_text(encoding="utf-8"))
+
+    pkt = {
+        "protocol": "s7comm",
+        "s7comm.ros": "1",
+        "s7comm.fn": "0x04",
+        "s7comm.db": "112",
+        "s7comm.addr": "46",
+    }
+
+    feat = preprocess_s7comm_with_norm(pkt, norm_params)
+    # feat = {
+    #   "s7comm_ros_norm": ...,
+    #   "s7comm_fn": ...,
+    #   "s7comm_db_norm": ...,
+    #   "s7comm_addr_norm": ...
+    # }
+
 usage:
     # 1) 학습용 s7comm 데이터에서 정규화 파라미터 + feature 생성
     python s7comm.py --fit -i "../data/ML_DL 학습.jsonl" -o "../result/output_s7comm"
