@@ -137,6 +137,20 @@ def compute_window_errors(
 # -----------------------------
 # 모델 로딩 (benchmark_lstm_ae_inference 스타일)
 # -----------------------------
+def load_first_packet(jsonl_path: Path) -> Dict[str, Any]:
+    with jsonl_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            return obj
+    raise RuntimeError("JSONL에서 유효한 패킷을 하나도 못 읽었음")
+
+
 def load_model_from_dir(model_dir: Path):
     """
     model_dir 내부:
@@ -352,6 +366,14 @@ def main():
 
     # 4) numpy 저장
     X_windows = np.stack(all_windows, axis=0)  # [num_windows, window_size, feat_dim]
+    
+    # protocol_norm
+    X_windows = normalize_protocol_column(
+        X_windows,
+        min_code=0.0,
+        max_code=8.0,   # PROTOCOL_MAP 최댓값(=dns) 기준
+        col_name="protocol",
+    )
     out_npy = output_dir / "X_windows.npy"
     np.save(out_npy, X_windows)
     print(f"[INFO] 저장 완료: {out_npy} (shape={X_windows.shape})")
@@ -372,48 +394,63 @@ def main():
 
         model, config, threshold_from_file = load_model_from_dir(model_dir)
 
-        # === 변경된 부분: feature_keys.txt 기준으로 입력 feature 재정렬/축소 ===
-        N_raw, T_raw, D_raw = X_windows.shape
-        print(f"[INFO] 원본 X_windows shape: (N={N_raw}, T={T_raw}, D={D_raw})")
+        # ---------------------------
+        # 1) feature_keys.txt 읽기
+        # ---------------------------
+        feat_path = model_dir / "feature_keys.txt"
+        if not feat_path.exists():
+            raise FileNotFoundError(f"❌ feature_keys.txt 없음: {feat_path}")
 
-        X_model = X_windows  # 기본은 전체 feature 사용
-        feat_indices = None
+        with feat_path.open("r", encoding="utf-8") as f:
+            feature_keys = [line.strip() for line in f if line.strip()]
 
-        feat_keys_path = model_dir / "feature_keys.txt"
-        if feat_keys_path.exists():
-            try:
-                with feat_keys_path.open("r", encoding="utf-8") as f:
-                    feature_keys = [line.strip() for line in f if line.strip()]
-                print(f"[INFO] feature_keys.txt 로드, 길이={len(feature_keys)}")
+        print(f"[INFO] feature_keys.txt 로드, 길이 = {len(feature_keys)}")
 
-                feat_indices = []
-                for k in feature_keys:
-                    if k in PACKET_FEATURE_COLUMNS:
-                        feat_indices.append(PACKET_FEATURE_COLUMNS.index(k))
-                    else:
-                        print(f"[WARN] feature_keys.txt에 있는 '{k}'가 PACKET_FEATURE_COLUMNS에 없습니다.")
+        # PACKET_FEATURE_COLUMNS 기준으로 이름 → 인덱스 매핑
+        col_index = {name: idx for idx, name in enumerate(PACKET_FEATURE_COLUMNS)}
 
-                if feat_indices:
-                    X_model = X_windows[:, :, feat_indices]
-                    print(f"[INFO] 모델 입력에 사용할 feature_dim = {X_model.shape[2]} "
-                          "(feature_keys.txt 기준)")
-                else:
-                    print("[WARN] feature_keys 기반 인덱스를 만들지 못했습니다. 전체 feature를 그대로 사용합니다.")
-            except Exception as e:
-                print(f"[WARN] feature_keys.txt 처리 중 오류: {e} → 전체 feature 사용")
-        else:
-            print("[INFO] feature_keys.txt 없음 → PACKET_FEATURE_COLUMNS 전체 사용")
+        # 모델이 기대하는 feature_keys 순서대로 인덱스 리스트 만들기
+        model_col_indices = []
+        missing_keys = []
+        for k in feature_keys:
+            if k in col_index:
+                model_col_indices.append(col_index[k])
+            else:
+                missing_keys.append(k)
 
-        # config와 현재 (모델 입력용) 데이터 shape consistency 체크
+        if missing_keys:
+            print("[WARN] benchmark에서 찾을 수 없는 feature key:", missing_keys)
+            print("       → 해당 feature는 pad_value로 채웁니다.")
+
+        # ---------------------------
+        # 2) X_windows → X_model 로 변환
+        #    (학습 때 사용한 feature 집합/순서로 맞추기)
+        # ---------------------------
+        N, T_cur, D_cur = X_windows.shape
+        print(f"[INFO] 원본 X_windows shape: (N={N}, T={T_cur}, D={D_cur})")
+
         T_cfg = config.get("T")
         D_cfg = config.get("D")
         pad_value = float(config.get("pad_value", 0.0))
-        _, T_cur, D_cur = X_model.shape
 
         if T_cfg is not None and T_cfg != T_cur:
             print(f"[WARN] config.T({T_cfg}) != 현재 window_size({T_cur})")
-        if D_cfg is not None and D_cfg != D_cur:
-            print(f"[WARN] config.D({D_cfg}) != 현재 feature_dim({D_cur})")
+        if D_cfg is not None and D_cfg != len(feature_keys):
+            print(f"[WARN] config.D({D_cfg}) != feature_keys 길이({len(feature_keys)})")
+
+        # 모델 입력 차원 = 학습에서 사용한 feature 개수
+        D_model = len(feature_keys)
+        X_model = np.zeros((N, T_cur, D_model), dtype=X_windows.dtype)
+
+        for j, k in enumerate(feature_keys):
+            if k in col_index:
+                src_idx = col_index[k]
+                X_model[:, :, j] = X_windows[:, :, src_idx]
+            else:
+                # 학습 feature인데 현재 benchmark에는 없는 경우 → pad_value로 채움
+                X_model[:, :, j] = pad_value
+
+        print(f"[INFO] 모델 입력용 X_model shape: {X_model.shape}")
 
         # threshold 결정: CLI > threshold.json > None
         threshold = args.threshold
@@ -437,7 +474,6 @@ def main():
             pass
 
         print("[INFO] DL 모델로 윈도우별 reconstruction 예측 중...")
-        # 🔥 이제는 X_model (subset된 feature) 로 예측
         recon = model.predict(X_model, batch_size=args.batch_size, verbose=1)
 
         if recon.shape != X_model.shape:
@@ -447,7 +483,7 @@ def main():
         # 🔥 train 코드와 동일한 방식으로 윈도우별 MSE 계산 (pad_value 마스킹)
         pad_value = float(config.get("pad_value", 0.0))
 
-        diff = X_model - recon  # (N, T, D)
+        diff = X_model - recon  # (N, T, D_model)
 
         # 각 timestep이 pad인지 아닌지: feature 중 하나라도 pad_value가 아니면 유효
         not_pad = np.any(np.not_equal(X_model, pad_value), axis=-1)  # (N, T)
@@ -501,6 +537,46 @@ def main():
         else:
             print("[INFO] threshold가 없으므로 is_anomaly = -1 로만 기록되었습니다. CSV에서 MSE 분포를 먼저 확인하세요.")
 
+# -----------------------------
+# protocol 정규화 유틸
+# -----------------------------
+def normalize_protocol_column(
+    X: np.ndarray,
+    min_code: float = 0.0,
+    max_code: float = 8.0,   # s7comm=1, tcp=2, ..., dns=8 기준
+    col_name: str = "protocol",
+) -> np.ndarray:
+    """
+    X: (N, T, D) window feature
+    PACKET_FEATURE_COLUMNS 에서 'protocol' 컬럼을 찾아
+    [min_code, max_code] -> [0,1] 로 정규화.
+
+    D 차원은 그대로 두고 해당 컬럼 값만 바꾼다.
+    """
+    if col_name not in PACKET_FEATURE_COLUMNS:
+        print(f"[INFO] PACKET_FEATURE_COLUMNS에 '{col_name}' 없음 → protocol 정규화 스킵")
+        return X
+
+    col_idx = PACKET_FEATURE_COLUMNS.index(col_name)
+
+    proto_vals = X[:, :, col_idx]
+
+    # 혹시 max_code를 None으로 두고 데이터 기준으로 잡고 싶으면 여기서 변경 가능
+    if max_code is None:
+        max_code = float(proto_vals.max())
+        print(f"[INFO] 데이터 기준 protocol max_code={max_code} 로 사용")
+
+    denom = (max_code - min_code) + 1e-9
+    X[:, :, col_idx] = (proto_vals - min_code) / denom
+
+    print(
+        f"[INFO] protocol 정규화 완료: "
+        f"min_code={min_code}, max_code={max_code}, "
+        f"col_idx={col_idx}"
+    )
+    return X
+
+
 
 if __name__ == "__main__":
     main()
@@ -516,6 +592,5 @@ python 1.benchmark.py --input "../data/attack.jsonl" --pre-dir "../../preprocess
 
 # 3) 슬라이딩 윈도우 (size=80, step=40) + LSTM-AE 탐지까지 수행할 때 threshold 지정
 python 1.benchmark.py --input "../data/attack.jsonl" --pre-dir "../../preprocessing/result" --window-size 8 --step-size 4 --output-dir "../result/benchmark" --model-dir "../data" --batch-size 128 --threshold 100
-
 
 """
