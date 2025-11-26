@@ -205,7 +205,7 @@ def load_raw_packets(raw_file: Path) -> Dict[datetime, Dict[str, Any]]:
                 continue
             try:
                 dt_raw = parse_ts(ts_str)
-                dt_key = dt_raw - timedelta(hours=9)  # ★ 9시간 보정
+                dt_key = dt_raw - timedelta(hours=0)  # ★ 9시간 보정
             except Exception:
                 skipped += 1
                 continue

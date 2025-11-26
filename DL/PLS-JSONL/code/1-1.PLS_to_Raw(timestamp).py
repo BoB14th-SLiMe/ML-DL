@@ -269,7 +269,7 @@ def slm_timestamp_mapping_pipeline(PLS_jsonl: Path, RAW_jsonl: Path):
             skipped_raw += 1
             continue
         try:
-            dt = parse_ts_to_dt(ts) - timedelta(hours=9)  # ★ 여기서 -9시간 보정
+            dt = parse_ts_to_dt(ts) - timedelta(hours=0)  # ★ 여기서 -9시간 보정
             packet_map[dt] = pkt
         except Exception:
             skipped_raw += 1
