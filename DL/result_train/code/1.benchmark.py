@@ -545,13 +545,14 @@ def normalize_protocol_column(
     min_code: float = 0.0,
     max_code: float = 8.0,   # s7comm=1, tcp=2, ..., dns=8 기준
     col_name: str = "protocol",
+    new_col_name: str = "protocol_norm",
 ) -> np.ndarray:
     """
     X: (N, T, D) window feature
-    PACKET_FEATURE_COLUMNS 에서 'protocol' 컬럼을 찾아
-    [min_code, max_code] -> [0,1] 로 정규화.
 
-    D 차원은 그대로 두고 해당 컬럼 값만 바꾼다.
+    기존 'protocol' 컬럼은 그대로 두고,
+    [min_code, max_code] → [0,1] 로 정규화한 값을
+    새 컬럼 'protocol_norm' 으로 D 차원 뒤에 하나 추가한다.
     """
     if col_name not in PACKET_FEATURE_COLUMNS:
         print(f"[INFO] PACKET_FEATURE_COLUMNS에 '{col_name}' 없음 → protocol 정규화 스킵")
@@ -559,23 +560,34 @@ def normalize_protocol_column(
 
     col_idx = PACKET_FEATURE_COLUMNS.index(col_name)
 
-    proto_vals = X[:, :, col_idx]
+    proto_vals = X[:, :, col_idx]  # (N, T)
 
-    # 혹시 max_code를 None으로 두고 데이터 기준으로 잡고 싶으면 여기서 변경 가능
+    # max_code를 데이터 기준으로 잡고 싶으면 None으로 두고 여기서 계산 가능
     if max_code is None:
         max_code = float(proto_vals.max())
         print(f"[INFO] 데이터 기준 protocol max_code={max_code} 로 사용")
 
     denom = (max_code - min_code) + 1e-9
-    X[:, :, col_idx] = (proto_vals - min_code) / denom
+    proto_norm = (proto_vals - min_code) / denom  # (N, T)
+
+    # 새 컬럼을 마지막 축에 추가
+    proto_norm_expanded = proto_norm[:, :, None]  # (N, T, 1)
+    X_new = np.concatenate([X, proto_norm_expanded], axis=-1)  # (N, T, D+1)
+
+    # 컬럼 이름 리스트에도 추가해서 인덱스 매핑이 맞도록
+    if new_col_name not in PACKET_FEATURE_COLUMNS:
+        PACKET_FEATURE_COLUMNS.append(new_col_name)
+        print(
+            f"[INFO] '{new_col_name}' 컬럼 추가 완료: "
+            f"old_dim={X.shape[-1]}, new_dim={X_new.shape[-1]}"
+        )
 
     print(
-        f"[INFO] protocol 정규화 완료: "
+        f"[INFO] protocol_norm 생성 완료: "
         f"min_code={min_code}, max_code={max_code}, "
-        f"col_idx={col_idx}"
+        f"src_col_idx={col_idx}, new_col_idx={len(PACKET_FEATURE_COLUMNS)-1}"
     )
-    return X
-
+    return X_new
 
 
 if __name__ == "__main__":
