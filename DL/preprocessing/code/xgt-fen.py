@@ -59,7 +59,7 @@ import argparse
 import numpy as np
 from pathlib import Path
 from typing import Any, Dict, List
-
+import re
 
 # ---------------------------------------------
 # Feature 이름 (설명용, 코드 내부에서는 dtype이 source of truth)
@@ -76,6 +76,16 @@ FEATURE_NAMES = [
     "xgt_err_flag",
     "xgt_err_code",
     "xgt_datasize",
+    # 👇 새로 추가되는 8개
+    "xgt_addr_count",
+    "xgt_addr_min",
+    "xgt_addr_max",
+    "xgt_addr_range",
+    "xgt_word_min",
+    "xgt_word_max",
+    "xgt_word_mean",
+    "xgt_word_std",
+    # 기존
     "xgt_data_missing",
     "xgt_data_len_chars",
     "xgt_data_num_spaces",
@@ -88,7 +98,6 @@ FEATURE_NAMES = [
     "xgt_data_bucket",
 ]
 
-# Min-Max 정규화 대상 필드
 NORM_FIELDS = [
     "xgt_var_cnt",
     "xgt_source",
@@ -102,7 +111,17 @@ NORM_FIELDS = [
     "xgt_data_len_chars",
     "xgt_data_num_spaces",
     "xgt_data_n_bytes",
+    # 👇 translated_addr / word_value 통계도 정규화 대상 추가
+    "xgt_addr_count",
+    "xgt_addr_min",
+    "xgt_addr_max",
+    "xgt_addr_range",
+    "xgt_word_min",
+    "xgt_word_max",
+    "xgt_word_mean",
+    "xgt_word_std",
 ]
+
 
 NORM_PARAMS_FILE = "xgt_fen_norm_params.json"
 
@@ -152,6 +171,133 @@ def to_int(value: Any, default: int = 0) -> int:
             return int(s)
         except ValueError:
             return default
+
+# ---------------------------------------------
+# translated_addr / word_value 리스트 파싱 + 통계
+# ---------------------------------------------
+# ---------------------------------------------
+# translated_addr / word_value 리스트 파싱 + 통계
+# ---------------------------------------------
+def parse_xgt_translated_addr_list(value: Any) -> List[int]:
+    """
+    xgt_fen.translated_addr: ["M1","M2", ...] 같은 값들을 숫자 리스트로 변환.
+    - "M1" -> 1, "M2" -> 2 처럼 '숫자 부분'만 추출해서 사용
+    """
+    result: List[int] = []
+
+    def _handle_one(x: Any):
+        s = str(x).strip()
+        if not s:
+            return
+        # 문자열 안에서 숫자 부분만 추출
+        m = re.search(r"(\d+)", s)
+        if m:
+            try:
+                result.append(int(m.group(1)))
+            except ValueError:
+                pass
+
+    if value is None:
+        return result
+
+    if isinstance(value, list):
+        for v in value:
+            _handle_one(v)
+        return result
+
+    s = str(value).strip()
+    # JSON 문자열 형태인 경우 예: '["M1","M2"]'
+    if s.startswith("[") and s.endswith("]"):
+        try:
+            arr = json.loads(s)
+            return parse_xgt_translated_addr_list(arr)
+        except Exception:
+            _handle_one(s)
+            return result
+
+    _handle_one(s)
+    return result
+
+
+def parse_xgt_word_value_list(value: Any) -> List[float]:
+    """
+    xgt_fen.word_value: ["0","1","2"] or [0,1,2] or "0" 등을 float 리스트로 변환.
+    """
+    result: List[float] = []
+
+    def _handle_one(x: Any):
+        try:
+            v = float(to_int(x))
+            result.append(v)
+        except Exception:
+            pass
+
+    if value is None:
+        return result
+
+    if isinstance(value, list):
+        for v in value:
+            _handle_one(v)
+        return result
+
+    s = str(value).strip()
+    if s.startswith("[") and s.endswith("]"):
+        try:
+            arr = json.loads(s)
+            return parse_xgt_word_value_list(arr)
+        except Exception:
+            _handle_one(s)
+            return result
+
+    _handle_one(s)
+    return result
+
+
+def compute_xgt_addr_stats(addrs: List[int]) -> Dict[str, float]:
+    """
+    translated_addr(숫자화된 것) 리스트에 대해 count/min/max/range 계산.
+    """
+    if not addrs:
+        return {
+            "count": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "range": 0.0,
+        }
+    count = float(len(addrs))
+    amin = float(min(addrs))
+    amax = float(max(addrs))
+    arange = float(amax - amin)
+    return {
+        "count": count,
+        "min": amin,
+        "max": amax,
+        "range": arange,
+    }
+
+
+def compute_xgt_word_stats(vals: List[float]) -> Dict[str, float]:
+    """
+    word_value 리스트에 대해 min/max/mean/std 계산.
+    """
+    if not vals:
+        return {
+            "min": 0.0,
+            "max": 0.0,
+            "mean": 0.0,
+            "std": 0.0,
+        }
+    vmin = float(min(vals))
+    vmax = float(max(vals))
+    mean = float(sum(vals) / len(vals))
+    var = float(sum((v - mean) ** 2 for v in vals) / len(vals))
+    std = float(var ** 0.5)
+    return {
+        "min": vmin,
+        "max": vmax,
+        "mean": mean,
+        "std": std,
+    }
 
 
 # ---------------------------------------------
@@ -309,10 +455,29 @@ def preprocess_xgt_record(obj: Dict[str, Any], get_var_id) -> Dict[str, float]:
     feat.update(data_feats)
 
     # 4) 데이터 없음 플래그 추가
-    #    - datasize > 0 이고, data_len_chars == 0 인 경우 → 1.0
     length_chars = data_feats.get("xgt_data_len_chars", 0.0)
     xgt_data_missing = 1.0 if (datasize > 0 and length_chars == 0.0) else 0.0
     feat["xgt_data_missing"] = float(xgt_data_missing)
+
+    # 5) translated_addr / word_value 통계 피처 추가 (M1, M2, ... 처리)
+    translated_addr_raw = obj.get("xgt_fen.translated_addr")
+    word_value_raw      = obj.get("xgt_fen.word_value")
+
+    addr_list = parse_xgt_translated_addr_list(translated_addr_raw)
+    word_list = parse_xgt_word_value_list(word_value_raw)
+
+    addr_stats = compute_xgt_addr_stats(addr_list)
+    word_stats = compute_xgt_word_stats(word_list)
+
+    feat["xgt_addr_count"] = addr_stats["count"]
+    feat["xgt_addr_min"]   = addr_stats["min"]
+    feat["xgt_addr_max"]   = addr_stats["max"]
+    feat["xgt_addr_range"] = addr_stats["range"]
+
+    feat["xgt_word_min"]   = word_stats["min"]
+    feat["xgt_word_max"]   = word_stats["max"]
+    feat["xgt_word_mean"]  = word_stats["mean"]
+    feat["xgt_word_std"]   = word_stats["std"]
 
     return feat
 
@@ -331,35 +496,36 @@ def minmax_norm(val: float, vmin: float, vmax: float) -> float:
 # ---------------------------------------------
 def apply_norm_to_xgt_feat(raw_feat: Dict[str, float],
                            norm_params: Dict[str, Dict[str, float]]) -> Dict[str, float]:
-    """
-    raw_feat: preprocess_xgt_record() 결과 (raw 값)
-    norm_params: xgt_fen_norm_params.json 내용
-    """
     feat: Dict[str, float] = {}
-
-    # 1) ID는 그대로
     feat["xgt_var_id"] = int(raw_feat.get("xgt_var_id", 0))
 
-    # 2) Min-Max 정규화 대상
     for f in NORM_FIELDS:
         raw_v = float(raw_feat.get(f, 0.0))
         p = norm_params.get(f, {})
         vmin = float(p.get("min", 0.0))
         vmax = float(p.get("max", 1.0))
-        feat[f] = float(minmax_norm(raw_v, vmin, vmax))
 
-    # 3) 플래그/ratio/bucket 등 그대로 사용
+        if f == "xgt_cmd":
+            # ✅ sentinel 로직 추가
+            if raw_v < vmin or raw_v > vmax:
+                feat[f] = -2.0
+            elif vmax > vmin:
+                feat[f] = (raw_v - vmin) / (vmax - vmin + 1e-9)
+            else:
+                feat[f] = 0.0
+        else:
+            feat[f] = float(minmax_norm(raw_v, vmin, vmax))
+
+    # 나머지는 그대로
     feat["xgt_err_flag"]       = float(raw_feat.get("xgt_err_flag", 0.0))
     feat["xgt_data_missing"]   = float(raw_feat.get("xgt_data_missing", 0.0))
     feat["xgt_data_is_hex"]    = float(raw_feat.get("xgt_data_is_hex", 0.0))
     feat["xgt_data_zero_ratio"]= float(raw_feat.get("xgt_data_zero_ratio", 0.0))
     feat["xgt_data_bucket"]    = float(raw_feat.get("xgt_data_bucket", 0.0))
 
-    # 4) 바이트 값 → 0~1 스케일 (/255)
     fb = float(raw_feat.get("xgt_data_first_byte", 0.0))
     lb = float(raw_feat.get("xgt_data_last_byte", 0.0))
     mb = float(raw_feat.get("xgt_data_mean_byte", 0.0))
-
     feat["xgt_data_first_byte"] = fb / 255.0
     feat["xgt_data_last_byte"]  = lb / 255.0
     feat["xgt_data_mean_byte"]  = mb / 255.0
@@ -459,7 +625,7 @@ def fit_preprocess(input_path: Path, out_dir: Path):
 
     # -----------------------------
     # 2) numpy 구조화 배열 생성 (정규화 적용)
-    # -----------------------------
+    # -----------------------------    
     dtype = np.dtype([
         ("xgt_var_id", "i4"),   # Embedding용 ID (int32)
         ("xgt_var_cnt", "f4"),
@@ -472,6 +638,16 @@ def fit_preprocess(input_path: Path, out_dir: Path):
         ("xgt_err_flag", "f4"),
         ("xgt_err_code", "f4"),
         ("xgt_datasize", "f4"),
+        # 👇 여기 추가
+        ("xgt_addr_count", "f4"),
+        ("xgt_addr_min", "f4"),
+        ("xgt_addr_max", "f4"),
+        ("xgt_addr_range", "f4"),
+        ("xgt_word_min", "f4"),
+        ("xgt_word_max", "f4"),
+        ("xgt_word_mean", "f4"),
+        ("xgt_word_std", "f4"),
+        # 기존
         ("xgt_data_missing", "f4"),
         ("xgt_data_len_chars", "f4"),
         ("xgt_data_num_spaces", "f4"),
@@ -483,6 +659,8 @@ def fit_preprocess(input_path: Path, out_dir: Path):
         ("xgt_data_mean_byte", "f4"),
         ("xgt_data_bucket", "f4"),
     ])
+
+
 
     data = np.zeros(len(rows_raw), dtype=dtype)
 
@@ -552,6 +730,14 @@ def transform_preprocess(input_path: Path, out_dir: Path):
         ("xgt_err_flag", "f4"),
         ("xgt_err_code", "f4"),
         ("xgt_datasize", "f4"),
+        ("xgt_addr_count", "f4"),
+        ("xgt_addr_min", "f4"),
+        ("xgt_addr_max", "f4"),
+        ("xgt_addr_range", "f4"),
+        ("xgt_word_min", "f4"),
+        ("xgt_word_max", "f4"),
+        ("xgt_word_mean", "f4"),
+        ("xgt_word_std", "f4"),
         ("xgt_data_missing", "f4"),
         ("xgt_data_len_chars", "f4"),
         ("xgt_data_num_spaces", "f4"),
@@ -563,6 +749,7 @@ def transform_preprocess(input_path: Path, out_dir: Path):
         ("xgt_data_mean_byte", "f4"),
         ("xgt_data_bucket", "f4"),
     ])
+
 
     data = np.zeros(len(rows_norm), dtype=dtype)
 

@@ -9,11 +9,19 @@
       {"window_id": 1, "RAW": [ {...}, {...}, ... ]}
 
   - 1-1_PLS_to_Raw_result.jsonl : 패턴 라벨 + 부분 패킷(window_group)
-      {"window_id": 1, "label": "P_0021", "window_group": [ {...}, ... ]}
+      {
+        "window_id": 1,
+        "pattern": "P_0021",         # 또는 "label"
+        "description": "...",        # (있으면)
+        "window_group": [ {...}, ... ]
+      }
 
   → 각 1-1 라인에 "index": [...] 를 추가.
     - index[i] 는 해당 window_id 의 RAW 리스트에서
       window_group[i] 패킷이 위치한 인덱스(0-based).
+
+  → 결과에는 pattern / description 도 함께 포함해서 넘김.
+     (1-1에 pattern이 없고 label만 있으면 pattern에 label을 복사)
 
 추가 동작:
   - pattern(또는 label)이 "noise" (대소문자 무시) 인 윈도우는 출력에서 제외
@@ -35,7 +43,7 @@ from collections import defaultdict
 
 # -------------------------------
 # 패킷 매칭에 사용할 키 생성
-# (여기서는 timestamp + sq 사용)
+# (여기서는 timestamp 사용)
 # -------------------------------
 KEY_FIELDS = [
     "@timestamp",
@@ -73,7 +81,9 @@ def build_raw_index_map(raw_jsonl_path: Path):
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError as e:
-                raise ValueError(f"[ERROR] JSON 파싱 실패 (line {line_no}) in {raw_jsonl_path}: {e}")
+                raise ValueError(
+                    f"[ERROR] JSON 파싱 실패 (line {line_no}) in {raw_jsonl_path}: {e}"
+                )
 
             window_id = obj["window_id"]
             raw_list = obj.get("RAW", [])
@@ -110,12 +120,19 @@ def add_index_to_pls_raw(
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError as e:
-                raise ValueError(f"[ERROR] JSON 파싱 실패 (line {line_no}) in {pls_jsonl_path}: {e}")
+                raise ValueError(
+                    f"[ERROR] JSON 파싱 실패 (line {line_no}) in {pls_jsonl_path}: {e}"
+                )
 
-            # 1) noise 패턴은 아예 버림 (대소문자 무시)
+            # 1) pattern / description 정규화
+            #    - pattern: obj["pattern"] 이 있으면 그대로, 없으면 label 사용
+            #    - description: obj["description"] 없으면 label 로 fallback
             pattern_raw = obj.get("pattern") or obj.get("label") or ""
-            pattern = str(pattern_raw).strip().lower()
-            if pattern == "noise":
+            description = obj.get("description") or obj.get("label") or ""
+
+            # noise 패턴은 아예 버림 (대소문자 무시)
+            pattern_lower = str(pattern_raw).strip().lower()
+            if pattern_lower == "noise":
                 skipped_noise += 1
                 continue
 
@@ -135,7 +152,7 @@ def add_index_to_pls_raw(
                 idx_list = per_window_map.get(key)
 
                 if idx_list:
-                    # RAW에서 해당 키로 찾은 첫 번째 인덱스를 사용 (소모 X)
+                    # RAW에서 해당 키로 찾은 첫 번째 인덱스를 사용
                     idx = idx_list[0]
                     index_list.append(idx)
                 else:
@@ -150,6 +167,9 @@ def add_index_to_pls_raw(
                 continue
 
             # 여기까지 왔다는 건 모든 패킷이 RAW에 매핑 성공했다는 뜻
+            # ★ pattern / description 을 결과에도 명시적으로 포함
+            obj["pattern"] = pattern_raw
+            obj["description"] = description
             obj["index"] = index_list
 
             # (옵션) 각 패킷 dict 안에 raw_index를 넣고 싶다면 아래 주석 해제

@@ -26,14 +26,22 @@ SCRIPTS = [
     "modbus.py",
     "s7comm.py",
     "xgt-fen.py",
+    # translated_addr slot feature
+    "preprocess_translated_addr_slot.py",
 ]
 
 
 def run_script(script_path: Path, input_path: Path, output_dir: Path, mode: str) -> int:
-    """하나의 전처리 스크립트를 subprocess로 실행하고, exit code 반환"""
+    """
+    하나의 전처리 스크립트를 subprocess로 실행하고, exit code 반환
+
+    - 일반 스크립트: 1번 실행
+    - preprocess_translated_addr_slot.py: modbus / xgt_fen 두 번 실행
+    """
     python_cmd = sys.executable  # 지금 이 파일을 실행 중인 파이썬 그대로 사용
 
-    cmd = [
+    # 공통 인자(--fit/--transform, -i, -o)까지는 동일
+    base_cmd = [
         python_cmd,
         str(script_path),
         f"--{mode}",
@@ -41,19 +49,35 @@ def run_script(script_path: Path, input_path: Path, output_dir: Path, mode: str)
         "-o", str(output_dir),
     ]
 
-    print(f"\n[▶] 실행 중: {script_path.name}")
-    print(" ".join(cmd))
+    cmds = []
 
-    try:
-        subprocess.run(cmd, check=True)
-        print(f"[✅] 완료: {script_path.name}")
-        return 0
-    except subprocess.CalledProcessError as e:
-        print(f"[❌] 실패: {script_path.name} (exit code {e.returncode})")
-        return e.returncode
-    except Exception as e:
-        print(f"[❌] 실패: {script_path.name} (unexpected error: {e})")
-        return -1
+    # 🔹 translated_addr slot 스크립트는 modbus / xgt_fen 두 번 실행
+    if script_path.name == "preprocess_translated_addr_slot.py":
+        for proto in ("modbus", "xgt_fen"):
+            cmds.append(base_cmd + ["-P", proto])
+    else:
+        # 그 외 스크립트는 한 번만 실행
+        cmds.append(base_cmd)
+
+    last_returncode = 0
+
+    for cmd in cmds:
+        print(f"\n[▶] 실행 중: {script_path.name}")
+        print(" ".join(cmd))
+
+        try:
+            subprocess.run(cmd, check=True)
+            print(f"[✅] 완료: {' '.join(cmd)}")
+        except subprocess.CalledProcessError as e:
+            print(f"[❌] 실패: {' '.join(cmd)} (exit code {e.returncode})")
+            last_returncode = e.returncode
+            # 한 번이라도 실패하면 바로 중단
+            return last_returncode
+        except Exception as e:
+            print(f"[❌] 실패: {' '.join(cmd)} (unexpected error: {e})")
+            return -1
+
+    return last_returncode
 
 
 def main():
@@ -155,5 +179,4 @@ if __name__ == "__main__":
 
 """
 python 2.run_all_preprocess.py --input "../data/ML_DL 학습.jsonl" --output "../result" --mode fit --skip dns.py modbus.py
-
 """

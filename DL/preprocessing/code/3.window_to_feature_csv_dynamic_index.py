@@ -43,12 +43,23 @@ window_to_feature_csv_dynamic_index.py
              ...
           ]
         }
+
+추가:
+  - 슬롯 메타 파일:
+      modbus_addr_slot_vocab.json
+      modbus_addr_slot_norm_params.json
+      xgt_addr_slot_vocab.json
+      xgt_addr_slot_norm_params.json
+    을 읽어서, 각 슬롯(40012, 40013, D523, D524, ...)별로
+      modbus_slot_40012_norm, xgt_slot_D523_norm
+    같은 피처를 동적으로 추가 (alias 없이 주소 문자열 그대로 사용)
 """
 
 import json
 import argparse
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+import re  # 슬롯 이름 sanitize 용
 
 # ==========================
 # 공통 유틸
@@ -80,26 +91,82 @@ def load_json(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+# def minmax_norm(x: float, vmin: float, vmax: float) -> float:
+#     """
+#     vmin/vmax 가 없거나 이상하면 0.0,
+#     vmin == vmax 이면 (훈련 데이터가 상수였던 경우)
+#       - x <= vmin → 0.0
+#       - x  > vmin → 1.0 로 처리
+#     그 외에는 [0, 1] 로 클램핑해서 반환
+#     """
+#     if vmin is None or vmax is None:
+#         return 0.0
+
+#     if vmax == vmin:
+#         return 0.0 if x <= vmin else 1.0
+
+#     val = (x - vmin) / (vmax - vmin + 1e-9)
+#     if val < 0.0:
+#         return 0.0
+#     if val > 1.0:
+#         return 1.0
+#     return val
+
+def minmax_norm_with_sentinel(
+    x: float,
+    vmin: float,
+    vmax: float,
+    sentinel: float = -2.0,
+) -> float:
+    """
+    이산 코드(예: xgt_cmd, protocol 등)에 쓰기 좋은 버전:
+      - vmin/vmax 밖이면 sentinel 반환
+      - 안에 있으면 0~1로 스케일
+    """
+    if vmin is None or vmax is None:
+        return 0.0
+
+    # 범위를 벗어나면 센티널
+    if x < vmin or x > vmax:
+        return float(sentinel)
+
+    if vmax == vmin:
+        return 0.0
+
+    val = (x - vmin) / (vmax - vmin + 1e-9)
+    # 혹시 수치 에러 대비해서 0~1 클립
+    if val < 0.0:
+        return 0.0
+    if val > 1.0:
+        return 1.0
+    return float(val)
+
+
 def minmax_norm(x: float, vmin: float, vmax: float) -> float:
     """
     vmin/vmax 가 없거나 이상하면 0.0,
     vmin == vmax 이면 (훈련 데이터가 상수였던 경우)
       - x <= vmin → 0.0
-      - x  > vmin → 1.0 로 처리
-    그 외에는 [0, 1] 로 클램핑해서 반환
+      - x  > vmin → -2.0 (범위 밖 센티널)
+    그 외:
+      - vmin <= x <= vmax → [0, 1] 로 변환
+      - x < vmin or x > vmax → -2.0
     """
     if vmin is None or vmax is None:
         return 0.0
 
+    # 상수인 경우: 훈련 데이터는 항상 vmin==vmax
     if vmax == vmin:
-        return 0.0 if x <= vmin else 1.0
+        return 0.0 if x <= vmin else -2.0
+
+    # 범위 밖이면 바로 센티널
+    if x < vmin or x > vmax:
+        return -2.0
 
     val = (x - vmin) / (vmax - vmin + 1e-9)
-    if val < 0.0:
-        return 0.0
-    if val > 1.0:
-        return 1.0
+    # 이 경우는 이론상 0~1 안이므로 추가 클램핑은 생략해도 OK
     return val
+
 
 
 def safe_int(val: Any, default: int = 0) -> int:
@@ -124,6 +191,14 @@ def safe_float(val: Any, default: float = 0.0) -> float:
         return float(val)
     except Exception:
         return default
+
+
+def sanitize_slot_name(name: str) -> str:
+    """슬롯 이름을 컬럼명으로 쓰기 좋게 변환 (영숫자/언더스코어만 유지)"""
+    s = str(name)
+    s = s.replace("%", "").replace(" ", "")
+    s = re.sub(r"[^0-9A-Za-z_]", "_", s)
+    return s
 
 
 # ==========================
@@ -243,6 +318,47 @@ def _parse_int_list(val: Any) -> List[int]:
     return []
 
 
+def _to_str_list(val: Any) -> List[str]:
+    if isinstance(val, list):
+        return [str(v).strip() for v in val if str(v).strip()]
+    if val is None:
+        return []
+    s = str(val).strip()
+    if not s:
+        return []
+    # "a,b", "a b" 둘 다 대충 쪼갬
+    s = s.replace(";", ",").replace(" ", ",")
+    parts = [p.strip() for p in s.split(",")]
+    return [p for p in parts if p]
+
+
+def _to_float_list(val: Any) -> List[float]:
+    if isinstance(val, list):
+        out: List[float] = []
+        for v in val:
+            try:
+                out.append(float(v))
+            except Exception:
+                continue
+        return out
+    if val is None:
+        return []
+    s = str(val).strip()
+    if not s:
+        return []
+    s = s.replace(";", ",")
+    out: List[float] = []
+    for p in s.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        try:
+            out.append(float(p))
+        except Exception:
+            continue
+    return out
+
+
 def _compute_regs_addr_stats(addrs: List[int]) -> Tuple[int, float, float, float]:
     if not addrs:
         return 0, 0.0, 0.0, 0.0
@@ -266,6 +382,7 @@ def _compute_regs_val_stats(vals: List[int]) -> Tuple[float, float, float, float
 def build_modbus_features(
     obj: Dict[str, Any],
     norm_params: Dict[str, Any],
+    slot_config: Dict[str, Any] = None,
 ) -> Dict[str, float]:
     # --- 기본 필드 ---
     addr = safe_int(obj.get("modbus.addr"))
@@ -273,7 +390,14 @@ def build_modbus_features(
     qty = safe_int(obj.get("modbus.qty"))
     bc = safe_int(obj.get("modbus.bc"))
 
-    regs_addr = obj.get("modbus.regs.addr")
+    # 🔸 주소 리스트는 modbus.py와 동일하게 "translated_addr" 우선 사용
+    #    - modbus.translated_addr 가 있으면 그걸 사용
+    #    - 없으면 modbus.regs.addr 사용
+    addr_source = obj.get("modbus.translated_addr")
+    if addr_source is None:
+        addr_source = obj.get("modbus.regs.addr")
+
+    regs_addr = addr_source
     regs_val = obj.get("modbus.regs.val")
 
     # --- 기본 modbus 필드용 min/max ---
@@ -343,7 +467,7 @@ def build_modbus_features(
     vmean_norm = minmax_norm(float(vmean), rv_mean_min, rv_mean_max)
     vstd_norm = minmax_norm(float(vstd), rv_std_min, rv_std_max)
 
-    return {
+    feat: Dict[str, float] = {
         "modbus_addr_norm": float(addr_norm),
         "modbus_fc_norm": float(fc_norm),
         "modbus_qty_norm": float(qty_norm),
@@ -357,6 +481,40 @@ def build_modbus_features(
         "modbus_regs_val_mean": float(vmean_norm),
         "modbus_regs_val_std": float(vstd_norm),
     }
+
+    # --- translated_addr 슬롯별 feature (옵션) ---
+    if slot_config:
+        slot_names: List[str] = slot_config.get("slot_names", [])
+        stats_cfg: Dict[str, Any] = slot_config.get("stats", {})
+        feat_names: Dict[str, str] = slot_config.get("feat_names", {})
+
+        addr_list = _to_str_list(obj.get("modbus.translated_addr"))
+        if not addr_list:
+            addr_list = _to_str_list(obj.get("modbus.regs.addr"))
+
+        val_list = _to_float_list(obj.get("modbus.word_value"))
+        if not val_list:
+            val_list = _to_float_list(obj.get("modbus.regs.val"))
+
+        value_map: Dict[str, float] = {}
+        for a, v in zip(addr_list, val_list):
+            if a not in value_map:
+                value_map[a] = v
+
+        for slot_name in slot_names:
+            feat_name = feat_names.get(slot_name)
+            if not feat_name:
+                continue
+            stat = stats_cfg.get(slot_name, {})
+            vmin = stat.get("min")
+            vmax = stat.get("max")
+            raw_v = value_map.get(slot_name)
+            if raw_v is None:
+                feat[feat_name] = 0.0
+            else:
+                feat[feat_name] = float(minmax_norm(float(raw_v), vmin, vmax))
+
+    return feat
 
 
 # ==========================
@@ -433,13 +591,14 @@ def build_xgt_fen_features(
     obj: Dict[str, Any],
     var_map: Dict[str, int],
     norm_params: Dict[str, Any],
+    slot_config: Dict[str, Any] = None,
 ) -> Dict[str, float]:
     # 1) RAW feature 우선 계산
     feat_raw: Dict[str, float] = {}
 
     source = safe_int(obj.get("xgt_fen.source"))
     datasize = safe_int(obj.get("xgt_fen.datasize"))
-    cmd = safe_int(obj.get("xgt_fen.cmd"))
+    cmd = safe_int(obj.get("xgt_fen.cmd"))  # 0x0055 → 85 이런 식
     dtype = safe_int(obj.get("xgt_fen.dtype"))
     blkcnt = safe_int(obj.get("xgt_fen.blkcnt"))
     errstat = safe_int(obj.get("xgt_fen.errstat"))
@@ -512,12 +671,45 @@ def build_xgt_fen_features(
     feat: Dict[str, float] = {}
 
     for k, v in feat_raw.items():
-        if k in XGT_NORM_FIELDS:
+        if k == "xgt_cmd":
+            vmin, vmax = get_xgt_minmax(norm_params, k)
+            if v < vmin or v > vmax:
+                feat[k] = -2.0
+            else:
+                feat[k] = minmax_norm(v, vmin, vmax)
+        elif k in XGT_NORM_FIELDS:
             vmin, vmax = get_xgt_minmax(norm_params, k)
             feat[k] = float(minmax_norm(v, vmin, vmax))
         else:
             # 정규화 안 하는 필드는 raw 값 그대로
             feat[k] = float(v)
+
+    # 3) translated_addr 슬롯별 feature (옵션)
+    if slot_config:
+        slot_names: List[str] = slot_config.get("slot_names", [])
+        stats_cfg: Dict[str, Any] = slot_config.get("stats", {})
+        feat_names: Dict[str, str] = slot_config.get("feat_names", {})
+
+        addr_list = _to_str_list(obj.get("xgt_fen.translated_addr"))
+        val_list = _to_float_list(obj.get("xgt_fen.word_value"))
+
+        value_map: Dict[str, float] = {}
+        for a, v in zip(addr_list, val_list):
+            if a not in value_map:
+                value_map[a] = v
+
+        for slot_name in slot_names:
+            feat_name = feat_names.get(slot_name)
+            if not feat_name:
+                continue
+            stat = stats_cfg.get(slot_name, {})
+            vmin = stat.get("min")
+            vmax = stat.get("max")
+            raw_v = value_map.get(slot_name)
+            if raw_v is None:
+                feat[feat_name] = 0.0
+            else:
+                feat[feat_name] = float(minmax_norm(float(raw_v), vmin, vmax))
 
     return feat
 
@@ -586,7 +778,8 @@ META_COLUMNS = [
     "delta_t",
 ]
 
-FEATURE_COLUMNS = [
+# 기존 고정 feature 목록 (translated_addr 슬롯 제외)
+BASE_FEATURE_COLUMNS = [
     # protocol one-hot 대신 scalar + 정규화
     "protocol_norm",
     # common
@@ -645,10 +838,14 @@ FEATURE_COLUMNS = [
     "dns_ac_norm",
 ]
 
-COLUMNS = META_COLUMNS + FEATURE_COLUMNS
+# 동적으로 채울 전역 리스트 (main에서 설정)
+FEATURE_COLUMNS: List[str] = []
+COLUMNS: List[str] = []
 
 
 def main():
+    global FEATURE_COLUMNS, COLUMNS
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-i",
@@ -663,8 +860,14 @@ def main():
         help="전처리 파라미터 JSON들이 모여있는 디렉토리",
     )
     parser.add_argument(
-        "-o",
-        "--output",
+        "-o1",
+        "--output1",
+        required=True,
+        help="출력 기준 경로 (기본: .jsonl)",
+    )
+    parser.add_argument(
+        "-o2",
+        "--output2",
         required=True,
         help="출력 기준 경로 (기본: .jsonl)",
     )
@@ -685,15 +888,16 @@ def main():
 
     input_path = Path(args.input)
     pre_dir = Path(args.pre_dir)
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output1_path = Path(args.output1)
+    output2_path = Path(args.output2)
+    output1_path.parent.mkdir(parents=True, exist_ok=True)
+    output2_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if args.json_output:
-        jsonl_path = Path(args.json_output)
-    else:
-        # 예전처럼 .csv 주면 같은 이름의 .jsonl로 저장
-        jsonl_path = output_path.with_suffix(".jsonl")
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    jsonl_path1 = Path(args.output1)
+    jsonl_path2 = Path(args.output2)
+
+    jsonl_path1.parent.mkdir(parents=True, exist_ok=True)
+    jsonl_path2.parent.mkdir(parents=True, exist_ok=True)
 
     # ----- 파라미터 로딩 -----
     common_host_map = load_json(pre_dir / "common_host_map.json")
@@ -707,6 +911,70 @@ def main():
 
     arp_host_map = load_json(pre_dir / "arp_host_map.json")
     dns_norm_params = load_json(pre_dir / "dns_norm_params.json")
+
+    # 슬롯 메타 (있으면 슬롯별 feature 추가)
+    modbus_slot_vocab = None
+    modbus_slot_norm_params = None
+    xgt_slot_vocab = None
+    xgt_slot_norm_params = None
+
+    # Modbus 슬롯 메타 로딩
+    try:
+        modbus_slot_vocab = load_json(pre_dir / "modbus_addr_slot_vocab.json")
+    except FileNotFoundError:
+        print("[WARN] modbus_addr_slot_vocab.json 없음 → modbus 슬롯 feature 미사용")
+    try:
+        modbus_slot_norm_params = load_json(pre_dir / "modbus_addr_slot_norm_params.json")
+    except FileNotFoundError:
+        print("[WARN] modbus_addr_slot_norm_params.json 없음 → modbus 슬롯 정규화 파라미터 없음 (0.0으로 대체)")
+
+    # XGT-FEnet 슬롯 메타 로딩
+    try:
+        xgt_slot_vocab = load_json(pre_dir / "xgt_addr_slot_vocab.json")
+    except FileNotFoundError:
+        print("[WARN] xgt_addr_slot_vocab.json 없음 → xgt_fen 슬롯 feature 미사용")
+    try:
+        xgt_slot_norm_params = load_json(pre_dir / "xgt_addr_slot_norm_params.json")
+    except FileNotFoundError:
+        print("[WARN] xgt_addr_slot_norm_params.json 없음 → xgt_fen 슬롯 정규화 파라미터 없음 (0.0으로 대체)")
+
+    # 동적 FEATURE_COLUMNS 구성
+    FEATURE_COLUMNS = list(BASE_FEATURE_COLUMNS)
+    modbus_slot_config = None
+    xgt_slot_config = None
+
+    if modbus_slot_vocab is not None:
+        # vocab 의 index 순서대로 슬롯 정렬
+        slot_names = sorted(modbus_slot_vocab.keys(), key=lambda k: modbus_slot_vocab[k])
+        stats = modbus_slot_norm_params if modbus_slot_norm_params is not None else {}
+        feat_names: Dict[str, str] = {}
+        for addr in slot_names:
+            safe = sanitize_slot_name(addr)
+            col = f"modbus_slot_{safe}_norm"
+            FEATURE_COLUMNS.append(col)
+            feat_names[addr] = col
+        modbus_slot_config = {
+            "slot_names": slot_names,
+            "stats": stats,
+            "feat_names": feat_names,
+        }
+
+    if xgt_slot_vocab is not None:
+        slot_names = sorted(xgt_slot_vocab.keys(), key=lambda k: xgt_slot_vocab[k])
+        stats = xgt_slot_norm_params if xgt_slot_norm_params is not None else {}
+        feat_names: Dict[str, str] = {}
+        for addr in slot_names:
+            safe = sanitize_slot_name(addr)
+            col = f"xgt_slot_{safe}_norm"
+            FEATURE_COLUMNS.append(col)
+            feat_names[addr] = col
+        xgt_slot_config = {
+            "slot_names": slot_names,
+            "stats": stats,
+            "feat_names": feat_names,
+        }
+
+    COLUMNS = META_COLUMNS + FEATURE_COLUMNS
 
     # ----- 1PASS: 윈도우 로딩 -----
     windows: List[Dict[str, Any]] = []
@@ -747,7 +1015,7 @@ def main():
     print(f"📏 span 필터 기준 global_window_size (--max-index): {global_window_size}")
 
     # ----- JSONL 작성 -----
-    with jsonl_path.open("w", encoding="utf-8") as fout_jsonl:
+    with jsonl_path1.open("w", encoding="utf-8") as fout_jsonl1, jsonl_path2.open("w", encoding="utf-8") as fout_jsonl2:
 
         win_cnt = 0
         skipped_by_span = 0
@@ -757,7 +1025,8 @@ def main():
 
         for win_obj in windows:
             window_id = win_obj.get("window_id")
-            pattern = win_obj.get("pattern")
+            pattern = win_obj.get("pattern") or win_obj.get("label")
+            description = win_obj.get("description")
 
             # 1) 패킷 시퀀스 가져오기 (sequence_group / window_group / RAW fallback)
             seq_group = win_obj.get("sequence_group")
@@ -849,6 +1118,7 @@ def main():
                 row: Dict[str, Any] = {col: 0.0 for col in COLUMNS}
                 row["window_id"] = window_id
                 row["pattern"] = pattern
+                row["description"] = description
                 row["protocol"] = float(protocol_code)
                 row["delta_t"] = float(delta_t)
 
@@ -866,11 +1136,11 @@ def main():
                     s7_feat = build_s7comm_features(pkt, s7comm_norm_params)
                     row.update(s7_feat)
                 elif protocol_str == "modbus":
-                    mb_feat = build_modbus_features(pkt, modbus_norm_params)
+                    mb_feat = build_modbus_features(pkt, modbus_norm_params, modbus_slot_config)
                     row.update(mb_feat)
                 elif protocol_str == "xgt_fen":
                     xgt_feat = build_xgt_fen_features(
-                        pkt, xgt_var_vocab, xgt_fen_norm_params
+                        pkt, xgt_var_vocab, xgt_fen_norm_params, xgt_slot_config
                     )
                     row.update(xgt_feat)
                 elif protocol_str == "arp":
@@ -904,7 +1174,9 @@ def main():
                 "window_size": window_size_real,  # 실제 패킷 개수
                 "sequence_group": seq_feature_group,
             }
-            fout_jsonl.write(json.dumps(out_obj, ensure_ascii=False) + "\n")
+            line = json.dumps(out_obj, ensure_ascii=False) + "\n"
+            fout_jsonl1.write(line)
+            fout_jsonl2.write(line)
             win_cnt += 1
 
     print(f"✅ 완료: 원본 {line_cnt_raw}개 라인 / {win_cnt}개 윈도우 처리")
@@ -914,7 +1186,6 @@ def main():
     print(f"   ↳ 유효 패킷이 없어 스킵된 윈도우 수: {skipped_empty}")
     print(f"→ span 기준 global_window_size(--max-index 또는 자동): {global_window_size}")
     print(f"→ 총 row 수(실제 패킷 수 합): {total_row_cnt}")
-    print(f"→ JSONL: {jsonl_path}")
 
 
 if __name__ == "__main__":
@@ -925,6 +1196,7 @@ if __name__ == "__main__":
 python 3.window_to_feature_csv_dynamic_index.py \
   --input "../data/pattern_windows.jsonl" \
   --pre_dir "../result" \
-  --output "../../train/data/pattern_features.csv" \
+  --output "../../train/data/pattern_features1.jsonl" \
+  --output2 "../../train/data/pattern_features2.jsonl" \
   --max-index 8
 """

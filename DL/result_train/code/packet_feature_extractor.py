@@ -60,12 +60,31 @@ def minmax_norm(x: float, vmin: Optional[float], vmax: Optional[float]) -> float
 
 
 def safe_int(val: Any, default: int = 0) -> int:
+    """
+    JSON에서 읽은 값이
+      - 정수
+      - "10" 같은 10진 문자열
+      - "0x0058" 같은 16진 문자열
+      - ["0x0058"] 같은 리스트
+    도 전부 안전하게 int로 바꿔주는 함수.
+    """
     try:
         if isinstance(val, list) and val:
             val = val[0]
+
+        if isinstance(val, str):
+            s = val.strip()
+            # 먼저 base=0으로 시도 (0x.., 0o.., 0b.. 지원)
+            try:
+                return int(s, 0)
+            except Exception:
+                # 그래도 안 되면 그냥 10진수로 한 번 더 시도
+                return int(s)
+
         return int(val)
     except Exception:
         return default
+
 
 
 def safe_float(val: Any, default: float = 0.0) -> float:
@@ -284,7 +303,7 @@ def _bucket_by_mean(mean_byte: float) -> int:
 def build_xgt_fen_features(
     obj: Dict[str, Any],
     get_var_id_xgt: Any,
-    norm_params: Dict[str, Any],  # 현재 raw만 사용하지만 형태 유지
+    norm_params: Dict[str, Any],
 ) -> Dict[str, float]:
     feat: Dict[str, float] = {}
 
@@ -335,12 +354,27 @@ def build_xgt_fen_features(
         zero_ratio = float(zero_cnt) / len(bytes_list)
         bucket = float(_bucket_by_mean(mean_b))
 
+    # 🔥 여기서만 xgt_cmd 값을 한 번만 결정
+    cmd_cfg = norm_params.get("xgt_cmd", {})
+    cmd_min = cmd_cfg.get("min")
+    cmd_max = cmd_cfg.get("max")
+
+    if cmd_min is not None and cmd_max is not None:
+        if cmd < cmd_min or cmd > cmd_max:
+            xgt_cmd_feat = -2.0
+        else:
+            xgt_cmd_feat = minmax_norm(float(cmd), cmd_min, cmd_max)
+    else:
+        xgt_cmd_feat = float(cmd)
+
+    feat["xgt_cmd"] = float(xgt_cmd_feat)
+
+    # 나머지 피처들
     feat["xgt_var_id"] = float(var_id)
     feat["xgt_var_cnt"] = float(var_cnt)
     feat["xgt_source"] = float(source)
     feat["xgt_fenet_base"] = float(xgt_fenet_base)
     feat["xgt_fenet_slot"] = float(xgt_fenet_slot)
-    feat["xgt_cmd"] = float(cmd)
     feat["xgt_dtype"] = float(dtype)
     feat["xgt_blkcnt"] = float(blkcnt)
     feat["xgt_err_flag"] = 1.0 if (errstat != 0 or errinfo != 0) else 0.0

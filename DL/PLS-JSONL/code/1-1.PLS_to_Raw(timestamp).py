@@ -269,7 +269,7 @@ def slm_timestamp_mapping_pipeline(PLS_jsonl: Path, RAW_jsonl: Path):
             skipped_raw += 1
             continue
         try:
-            dt = parse_ts_to_dt(ts) - timedelta(hours=0)  # ★ 여기서 -9시간 보정
+            dt = parse_ts_to_dt(ts) - timedelta(hours=-9)  # ★ 여기서 -9시간 보정
             packet_map[dt] = pkt
         except Exception:
             skipped_raw += 1
@@ -282,6 +282,7 @@ def slm_timestamp_mapping_pipeline(PLS_jsonl: Path, RAW_jsonl: Path):
     for pattern in tqdm(PLS, desc="Global 매핑 중", leave=False, ncols=90):
         win_id = pattern.get("window_id", 0)
         label_from_slm = pattern.get("label", "Unknown")
+        description_from_slm = pattern.get("description", "Unknown")
 
         window_group = []
 
@@ -310,6 +311,7 @@ def slm_timestamp_mapping_pipeline(PLS_jsonl: Path, RAW_jsonl: Path):
             results.append({
                 "window_id": win_id,
                 "label": label_from_slm,
+                "description": description_from_slm,
                 "window_group": window_group
             })
 

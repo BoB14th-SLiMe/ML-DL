@@ -211,14 +211,18 @@ def extract_modbus_raw(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     qty  = parse_int_field(obj.get("modbus.qty"))
     bc   = parse_int_field(obj.get("modbus.bc"))
 
-    # 🔸 주소는 translated_addr를 우선 사용, 없으면 regs.addr 사용
-    raw_addr_source = obj.get("modbus.translated_addr")
-    if raw_addr_source is None:
+    # 🔸 주소는 modbus.regs.translated_addr 를 최우선 사용
+    #     없으면 modbus.translated_addr → 없으면 modbus.regs.addr
+    raw_addr_source = obj.get("modbus.regs.translated_addr")
+    if not raw_addr_source:  # [], None, "" 등 모두 포함
+        raw_addr_source = obj.get("modbus.translated_addr")
+    if not raw_addr_source:
         raw_addr_source = obj.get("modbus.regs.addr")
 
     regs_addr = parse_int_list_field(raw_addr_source)
     regs_val  = parse_float_list_field(obj.get("modbus.regs.val"))
 
+    # 아무 정보도 없는 패킷이면 스킵
     if all(v is None for v in (addr, fc, qty, bc)) and (not regs_addr) and (not regs_val):
         return None
 
@@ -227,7 +231,7 @@ def extract_modbus_raw(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "fc": fc,
         "qty": qty,
         "bc": bc,
-        "regs_addr": regs_addr,
+        "regs_addr": regs_addr,   # ← 이제 여기 안에 modbus.regs.translated_addr 값이 들어감
         "regs_val": regs_val,
     }
 

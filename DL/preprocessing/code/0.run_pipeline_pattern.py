@@ -65,8 +65,8 @@ def main():
     ml_dl_json = base_dir / "../data/ML_DL 학습.jsonl"
     pre_dir = base_dir / "../result"
     pattern_windows = base_dir / "../data/pattern_windows.jsonl"
-    static_feature_csv = pre_dir / "pattern_features.csv"
-    dynamic_feature_out = base_dir / "../../train/data/pattern_features.csv"
+    dynamic_feature_out1 = base_dir / "../../train/data/pattern_features.jsonl"
+    dynamic_feature_out2 = base_dir / "../../pattern_labeling/train/data/pattern_features.jsonl"
 
     # python 실행기 (현재 파이썬 그대로 사용)
     py = sys.executable
@@ -97,8 +97,10 @@ def main():
         str(pattern_windows),
         "--pre_dir",
         str(pre_dir),
-        "--output",
-        str(dynamic_feature_out),
+        "--output1",
+        str(dynamic_feature_out1),
+        "--output2",
+        str(dynamic_feature_out2),
         "--max-index",
         str(args.max_index),
     ]
@@ -106,8 +108,6 @@ def main():
 
     print("\n🎉 전체 파이프라인 완료!")
     print(f"  - 전처리 파라미터 디렉토리 : {pre_dir}")
-    print(f"  - 패킷 단위 feature CSV   : {static_feature_csv}")
-    print(f"  - T={args.max_index} 시퀀스 JSONL 기준경로 : {dynamic_feature_out.with_suffix('.jsonl')}")
 
 
 if __name__ == "__main__":

@@ -80,7 +80,12 @@ def parse_args() -> argparse.Namespace:
             "(미지정 시 threshold.json이 있으면 그 값을 사용, 둘 다 없으면 점수만 기록)"
         ),
     )
+    p.add_argument(
+        "--tag", default=None,
+        help="출력 파일 이름에 붙일 태그 (기본: 입력 JSONL 파일명 stem)",
+    )
 
+    
     return p.parse_args()
 
 
@@ -260,6 +265,8 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    tag = args.tag if args.tag is not None else input_path.stem
+
     window_size = args.window_size
     step_size = args.step_size if args.step_size is not None else window_size
     pad_last = not args.no_pad_last
@@ -267,6 +274,7 @@ def main():
     print(f"[INFO] 입력 JSONL : {input_path}")
     print(f"[INFO] 전처리 디렉토리 : {pre_dir}")
     print(f"[INFO] 출력 디렉토리 : {output_dir}")
+    print(f"[INFO] 사용 태그(tag) = {tag}")
     print(f"[INFO] window_size = {window_size}, step_size = {step_size}, pad_last = {pad_last}")
 
     # 1) 전처리 파라미터 로딩 (packet_feature_extractor 내부 정의에 맞게)
@@ -374,16 +382,17 @@ def main():
         max_code=8.0,   # PROTOCOL_MAP 최댓값(=dns) 기준
         col_name="protocol",
     )
-    out_npy = output_dir / "X_windows.npy"
+    out_npy = output_dir / f"X_windows_{tag}.npy"
     np.save(out_npy, X_windows)
     print(f"[INFO] 저장 완료: {out_npy} (shape={X_windows.shape})")
 
     # 5) 메타정보 JSONL 저장
-    out_meta = output_dir / "windows_meta.jsonl"
+    out_meta = output_dir / f"windows_meta_{tag}.jsonl"
     with out_meta.open("w", encoding="utf-8") as fmeta:
         for m in meta_list:
             fmeta.write(json.dumps(m, ensure_ascii=False) + "\n")
     print(f"[INFO] 메타 정보 저장 완료: {out_meta}")
+
 
     # ============================
     # 6) DL 모델 불러서 탐지 (선택)
@@ -504,7 +513,7 @@ def main():
             f"max={mse_per_window.max():.4f}"
         )
 
-        out_scores = output_dir / "window_scores.csv"
+        out_scores = output_dir / f"window_scores_{tag}.csv"
         with out_scores.open("w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
@@ -547,13 +556,6 @@ def normalize_protocol_column(
     col_name: str = "protocol",
     new_col_name: str = "protocol_norm",
 ) -> np.ndarray:
-    """
-    X: (N, T, D) window feature
-
-    기존 'protocol' 컬럼은 그대로 두고,
-    [min_code, max_code] → [0,1] 로 정규화한 값을
-    새 컬럼 'protocol_norm' 으로 D 차원 뒤에 하나 추가한다.
-    """
     if col_name not in PACKET_FEATURE_COLUMNS:
         print(f"[INFO] PACKET_FEATURE_COLUMNS에 '{col_name}' 없음 → protocol 정규화 스킵")
         return X
@@ -568,7 +570,17 @@ def normalize_protocol_column(
         print(f"[INFO] 데이터 기준 protocol max_code={max_code} 로 사용")
 
     denom = (max_code - min_code) + 1e-9
-    proto_norm = (proto_vals - min_code) / denom  # (N, T)
+
+    # 전체를 먼저 -2.0(센티널)로 채워두고
+    proto_norm = np.full_like(proto_vals, fill_value=-2.0, dtype=np.float32)
+
+    # min_code ~ max_code 안에 들어오는 값만 0~1로 스케일링
+    in_range = (proto_vals >= min_code) & (proto_vals <= max_code)
+    if np.any(in_range):
+        scaled = (proto_vals[in_range] - min_code) / denom
+        # 혹시라도 수치오차로 살짝 벗어나면 0~1로 클립
+        scaled = np.clip(scaled, 0.0, 1.0)
+        proto_norm[in_range] = scaled
 
     # 새 컬럼을 마지막 축에 추가
     proto_norm_expanded = proto_norm[:, :, None]  # (N, T, 1)

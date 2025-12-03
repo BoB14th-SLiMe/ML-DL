@@ -1,4 +1,24 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+analyze_mse_dist.py
+
+attack_result (GT) CSV와 window_scores (pred) CSV를 기준으로
+MSE / score 분포를 분석하고, 패턴/프로토콜/자산별 그룹 통계를 계산하는 스크립트.
+
+입력:
+  --attack-csv : 윈도우 단위 GT 라벨 CSV (예: attack_result_XXX.csv)
+  --pred-csv   : 윈도우 단위 점수/예측 CSV (예: window_scores_XXX.csv)
+
+출력:
+  --output-json 을 지정하면 그 경로에 저장.
+  지정하지 않으면, pred CSV 디렉토리에
+    analyze_mse_dist_{tag}.json
+  으로 자동 저장.
+  (tag 기본값: pred CSV 파일명 stem)
+"""
+
 import argparse
 import pandas as pd
 import numpy as np
@@ -91,15 +111,51 @@ def make_group_stats(df, group_col, label_col, score_col):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--attack-csv", required=True)
-    p.add_argument("--pred-csv", required=True)
-    p.add_argument("--output-json", default=None)
-    p.add_argument("--top-k", type=int, default=20,
-                   help="오차가 큰 윈도우를 상위 몇 개까지 저장할지 (기본 20)")
+    p.add_argument("--attack-csv", required=True, help="GT 윈도우 라벨 CSV (attack_result_XXX.csv 등)")
+    p.add_argument("--pred-csv", required=True, help="모델 점수/예측 CSV (window_scores_XXX.csv 등)")
+    p.add_argument(
+        "--output-json",
+        default=None,
+        help=(
+            "분석 결과 JSON 파일 경로. "
+            "미지정 시 pred CSV 디렉토리에 analyze_mse_dist_{tag}.json 으로 저장"
+        ),
+    )
+    p.add_argument(
+        "--top-k",
+        type=int,
+        default=20,
+        help="오차가 큰 윈도우를 상위 몇 개까지 저장할지 (기본 20)",
+    )
+    p.add_argument(
+        "--tag",
+        default=None,
+        help=(
+            "출력 JSON 이름에 사용할 태그 "
+            "(기본: pred CSV 파일명 stem, 예: window_scores_attack_ver5_1)"
+        ),
+    )
     args = p.parse_args()
 
-    df_attack = pd.read_csv(args.attack_csv)
-    df_pred = pd.read_csv(args.pred_csv)
+    attack_path = Path(args.attack_csv)
+    pred_path = Path(args.pred_csv)
+
+    # 🔥 tag 결정 (기본: pred CSV stem)
+    tag = args.tag if args.tag is not None else pred_path.stem
+
+    # 🔥 output JSON 경로 결정
+    if args.output_json is not None:
+        out_path = Path(args.output_json)
+    else:
+        out_path = pred_path.parent / f"analyze_mse_dist_{tag}.json"
+
+    print(f"[INFO] GT CSV (attack)      : {attack_path}")
+    print(f"[INFO] Pred CSV (scores)    : {pred_path}")
+    print(f"[INFO] 사용 태그(tag)       : {tag}")
+    print(f"[INFO] 출력 JSON (result)   : {out_path}")
+
+    df_attack = pd.read_csv(attack_path)
+    df_pred = pd.read_csv(pred_path)
 
     # window_index 기준으로 join
     df = pd.merge(
@@ -112,6 +168,10 @@ def main():
     # 어떤 컬럼이 라벨/점수인지 자동으로 선택
     label_col = pick_label_col(df)
     score_col = pick_score_col(df)
+
+    # 타입 정리 (라벨은 int, score는 float)
+    df[label_col] = df[label_col].astype(int)
+    df[score_col] = df[score_col].astype(float)
 
     # attack / normal 분리
     attack = df[df[label_col] == 1][score_col].values
@@ -184,17 +244,39 @@ def main():
     }, indent=2, ensure_ascii=False))
 
     # 전체를 JSON 파일로 저장
-    if args.output_json:
-        Path(args.output_json).write_text(
-            json.dumps(stats, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(stats, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    print(f"[INFO] 분석 결과 JSON 저장 완료 → {out_path}")
 
 
 if __name__ == "__main__":
     main()
 
 """
-python 3.analyze_mse_dist.py --attack-csv ../result/attack_result.csv --pred-csv ../result/benchmark/window_scores.csv --output-json ../result/analyze_mse_dist.json
+예시:
 
+python 3.analyze_mse_dist.py \
+  --attack-csv ../result/attack_result_attack_ver5_1.csv \
+  --pred-csv ../result/benchmark/window_scores_attack_ver5_1.csv
+
+# → ../result/benchmark/analyze_mse_dist_window_scores_attack_ver5_1.json 생성
+
+또는 태그를 직접 주고 싶으면:
+
+python 3.analyze_mse_dist.py \
+  --attack-csv ../result/attack_result_attack_ver5_2.csv \
+  --pred-csv ../result/benchmark/window_scores_attack_ver5_2.csv \
+  --tag attack_ver5_2
+
+# → ../result/benchmark/analyze_mse_dist_attack_ver5_2.json 생성
+
+명시적으로 경로를 주고 싶으면:
+
+python 3.analyze_mse_dist.py \
+  --attack-csv ../result/attack_result_attack_ver5_1.csv \
+  --pred-csv ../result/benchmark/window_scores_attack_ver5_1.csv \
+  --output-json ../result/analyze_mse_dist_attack_ver5_1.json
 """

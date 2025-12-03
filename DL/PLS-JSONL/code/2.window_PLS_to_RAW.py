@@ -139,7 +139,8 @@ def load_window_pls(window_pls_file: Path) -> Dict[int, Dict[str, Any]]:
             if win_id is None:
                 continue
 
-            pattern = obj.get("pattern") or obj.get("label")
+            pattern = obj.get("label") or obj.get("pattern")
+            description = obj.get("description")
 
             flows_info: List[Dict[str, Any]] = []
             for flow in obj.get("pls", []):
@@ -154,6 +155,7 @@ def load_window_pls(window_pls_file: Path) -> Dict[int, Dict[str, Any]]:
 
             result[win_id] = {
                 "pattern": pattern,
+                "description": description,
                 "flows": flows_info,
             }
 
@@ -205,7 +207,7 @@ def load_raw_packets(raw_file: Path) -> Dict[datetime, Dict[str, Any]]:
                 continue
             try:
                 dt_raw = parse_ts(ts_str)
-                dt_key = dt_raw - timedelta(hours=0)  # ★ 9시간 보정
+                dt_key = dt_raw - timedelta(hours=-9)  # ★ 9시간 보정
             except Exception:
                 skipped += 1
                 continue
@@ -270,6 +272,8 @@ def map_window_pls_to_raw(
             full_matched += 1
             results.append({
                 "window_id": win_id,
+                "pattern": info.get("pattern"),
+                "description": info.get("description"),
                 "RAW": window_group,
             })
         else:
