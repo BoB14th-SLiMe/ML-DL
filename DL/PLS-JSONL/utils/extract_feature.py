@@ -12,30 +12,41 @@ from collections import Counter
 import re
 from typing import Optional, Dict, Any
 
-_TS = re.compile(r'timestamp[=:]"?([0-9T:\.\-Z\+]+)"?')
-_SQ = re.compile(r'\bsq[=:]"?([^"\s]+)"?')
-_AK = re.compile(r'\bak[=:]"?([^"\s]+)"?')
-_FL = re.compile(r'\bfl[=:]"?([^"\s]+)"?')
+_TS_RE = re.compile(r'@timestamp\s*[:=]\s*"?([0-9T:\.\-Z\+]+)"?')
+_TS_ATTR_RE = re.compile(r'\btimestamp\s*=\s*"([^"]+)"')
+_SQ_RE = re.compile(r'\bsq\s*[:=]\s*"?([^",>\s]+)"?')
+_AK_RE = re.compile(r'\bak\s*[:=]\s*"?([^",>\s]+)"?')
+_FL_RE = re.compile(r'\bfl\s*[:=]\s*"?([^",>\s]+)"?')
 
-def pls_extract(pls: Any) -> Optional[Dict[str, str]]:
-    if not isinstance(pls, str):
+def pls_extract(pls_line: Any) -> Optional[Dict[str, str]]:
+    if isinstance(pls_line, dict):
+        ts = pls_line.get("@timestamp") or pls_line.get("timestamp")
+        sq = pls_line.get("sq")
+        ak = pls_line.get("ak")
+        fl = pls_line.get("fl")
+        if ts and sq is not None and ak is not None and fl is not None:
+            return {"@timestamp": str(ts), "sq": str(sq), "ak": str(ak), "fl": str(fl)}
         return None
 
-    ts = _TS.search(pls)
-    sq = _SQ.search(pls)
-    ak = _AK.search(pls)
-    fl = _FL.search(pls)
+    if not isinstance(pls_line, str):
+        return None
+
+    pls = pls_line
+
+    ts = _TS_RE.search(pls).group(1)
+    sq = _SQ_RE.search(pls)
+    ak = _AK_RE.search(pls)
+    fl = _FL_RE.search(pls)
 
     if not (ts and sq and ak and fl):
         return None
 
     return {
-        "@timestamp": ts.group(1),
+        "@timestamp": ts,
         "sq": sq.group(1),
         "ak": ak.group(1),
         "fl": fl.group(1),
     }
-
 
 def raw_extract(RAW: list, required: list):
   skipped = 0
