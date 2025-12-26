@@ -1,14 +1,10 @@
 """
-file_loader.py
+extract_feature.py
 
-다음 파일을 로드하는 함수
-  - json
-  - jsonl
+pls_extract : PLS 데이터에서 timestamp, sq, ak, fl 추출
 
-input
-  - file_type : 파일 종류
-  - file_path : 파일 경로
-  
+raw_extract : 원본 데이터에서 required에 해당하는 key 추출
+
 """
 import re
 from collections import Counter
