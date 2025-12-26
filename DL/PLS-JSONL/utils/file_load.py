@@ -58,7 +58,3 @@ def jsonl_load(file_path: str):
     return file_data
   except Exception as e:
     print(f"{e}")
-
-
-# result = file_load("jsonl", "./pattern_windows(기존 매핑).jsonl")
-# print(f"{result}")
