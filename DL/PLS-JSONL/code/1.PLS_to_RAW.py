@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-1-1.PLS_to_RAW.py
+1.PLS_to_RAW.py
 
 PLS(JSONL) 결과와 RAW(JSONL) 패킷을 다음 기준으로 매핑한다.
   - @timestamp
