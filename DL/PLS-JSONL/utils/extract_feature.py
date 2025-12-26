@@ -22,7 +22,6 @@ _AK = re.compile(r'\bak[=:]"?([^"\s]+)"?')
 _FL = re.compile(r'\bfl[=:]"?([^"\s]+)"?')
 
 def pls_extract(pls: Any) -> Optional[Dict[str, str]]:
-    # 핵심: string 아니면 스킵(혼합 타입 때문에 죽는 문제 해결)
     if not isinstance(pls, str):
         return None
 
@@ -35,7 +34,7 @@ def pls_extract(pls: Any) -> Optional[Dict[str, str]]:
         return None
 
     return {
-        "@timestamp": ts.group(1),   # RAW는 @timestamp를 쓰므로 통일
+        "@timestamp": ts.group(1),
         "sq": sq.group(1),
         "ak": ak.group(1),
         "fl": fl.group(1),
@@ -61,7 +60,6 @@ def raw_extract(RAW: list, required: list):
       skipped += 1
       print(f"[SKIP] idx={i} missing={missing}")
 
-      # 레코드 기준 집계 (키 중복 방지)
       for key, reason in missing:
         missing_by_key[key] += 1
         missing_by_key_reason[(key, reason)] += 1
