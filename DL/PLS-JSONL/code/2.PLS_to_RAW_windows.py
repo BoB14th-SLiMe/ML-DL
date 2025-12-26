@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+2.PLS_to_RAW_windows.py
+
+SLM이 패턴 분석에 사용한 전체 windows의 데이터는 PLS로 이루어져 있다. 이를 원본 데이터 RAW로 변경한다.
+PLS(JSONL) 결과와 RAW(JSONL) 패킷을 다음 기준으로 매핑한다.
+  - @timestamp
+  - sq
+  - ak
+  - fl
+"""
+
+from pathlib import Path
+from tqdm import tqdm
+import sys
+from collections import defaultdict, deque
+from typing import List, Dict, Any, Tuple
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from utils.file_load import file_load
+from utils.extract_feature import pls_extract, raw_extract
+from utils.file_save import save_jsonl
+
+def PLS_to_RAW_mapping(PLS_jsonl: Path, RAW_jsonl: Path, out_jsonl: Path):
+    file_type = "jsonl"
+    match_required = ("@timestamp", "sq", "ak", "fl")
+
+    RAW = file_load(file_type, RAW_jsonl)
+    if RAW is None:
+        print(f"RAW empty: {RAW_jsonl}")
+
+    PLS = file_load(file_type, PLS_jsonl)
+    if PLS is None:
+        print(f"PLS empty: {PLS_jsonl}")
+
+    packet_map: Dict[Tuple[str, str, str, str], deque] = defaultdict(deque)
+    skipped_raw = 0
+
+    for pkt in RAW:
+        if any(pkt.get(k) in (None, "") for k in match_required):
+            skipped_raw += 1
+            continue
+        key = (str(pkt["@timestamp"]), str(pkt["sq"]), str(pkt["ak"]), str(pkt["fl"]))
+        packet_map[key].append(pkt)
+
+    results: List[Dict[str, Any]] = []
+    matched_windows = 0
+    total_pls_lines = 0
+    no_fields_lines = 0
+    miss_match_lines = 0
+
+    for pattern in tqdm(PLS, desc="PLS 매핑 중", leave=True, ncols=80):
+        window_id_from_slm = pattern.get("window_id", 0)
+
+        sequence_group = []
+        for pls_line in pattern.get("pls", []):
+            total_pls_lines += 1
+            fields = pls_extract(pls_line)
+            if not fields:
+                no_fields_lines += 1
+                continue
+
+            key = (str(fields["@timestamp"]), str(fields["sq"]), str(fields["ak"]), str(fields["fl"]))
+            dq = packet_map.get(key)
+            if dq:
+                pkt = dq.popleft()
+                pkt_copy = pkt.copy()
+                pkt_copy["match"] = "O"
+                sequence_group.append(pkt_copy)
+            else:
+                miss_match_lines += 1
+
+        if sequence_group:
+            matched_windows += 1
+            results.append({
+                "window_id": window_id_from_slm,
+                "sequence_group": sequence_group
+            })
+
+    print("\n=== MAPPING SUMMARY ===")
+    print(f"raw_total={len(RAW)}, raw_skipped_missing_required={skipped_raw}")
+    print(f"pls_total_patterns={len(PLS)}")
+    print(f"pls_total_lines={total_pls_lines}, pls_no_fields={no_fields_lines}, pls_miss_match={miss_match_lines}")
+    print(f"matched_windows={matched_windows}, results={len(results)}")
+
+    if out_jsonl is not None:
+        save_jsonl(results, out_jsonl)
+        print(f"[SAVE] results_jsonl -> {out_jsonl} (lines={len(results)})")
+    return results
+
+
+if __name__ == "__main__":
+    pls_path = ROOT / "data" / "window_pls_80.jsonl"
+    raw_path = ROOT / "data" / "RAW.jsonl"
+    out_path = ROOT / "results" / "PLS_to_RAW_windows_mapped.jsonl"
+    PLS_to_RAW_mapping(pls_path, raw_path, out_path)
