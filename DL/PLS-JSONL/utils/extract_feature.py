@@ -47,6 +47,18 @@ def pls_extract(pls_line: Any) -> Optional[Dict[str, str]]:
         "fl": fl.group(1),
     }
 
+
+def timestamp_extract(pls_line: str) -> Optional[str]:
+    if not isinstance(pls_line, str):
+        return None
+
+    ts = re.search(r'timestamp="([\w\-\:\.TZ\+]+)"', pls_line)
+    if ts:
+        return ts.group(1)
+
+    return None
+
+
 def raw_extract(RAW: list, required: list):
   skipped = 0
   missing_by_key = Counter()
