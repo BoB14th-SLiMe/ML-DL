@@ -13,7 +13,6 @@ import re
 from typing import Optional, Dict, Any
 
 _TS_RE = re.compile(r'@timestamp\s*[:=]\s*"?([0-9T:\.\-Z\+]+)"?')
-_TS_ATTR_RE = re.compile(r'\btimestamp\s*=\s*"([^"]+)"')
 _SQ_RE = re.compile(r'\bsq\s*[:=]\s*"?([^",>\s]+)"?')
 _AK_RE = re.compile(r'\bak\s*[:=]\s*"?([^",>\s]+)"?')
 _FL_RE = re.compile(r'\bfl\s*[:=]\s*"?([^",>\s]+)"?')
@@ -33,7 +32,7 @@ def pls_extract(pls_line: Any) -> Optional[Dict[str, str]]:
 
     pls = pls_line
 
-    ts = _TS_RE.search(pls).group(1)
+    ts = _TS_RE.search(pls)
     sq = _SQ_RE.search(pls)
     ak = _AK_RE.search(pls)
     fl = _FL_RE.search(pls)
@@ -42,7 +41,7 @@ def pls_extract(pls_line: Any) -> Optional[Dict[str, str]]:
         return None
 
     return {
-        "@timestamp": ts,
+        "@timestamp": ts.group(1),
         "sq": sq.group(1),
         "ak": ak.group(1),
         "fl": fl.group(1),

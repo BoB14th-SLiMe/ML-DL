@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# #!/usr/bin/env python3
+# # -*- coding: utf-8 -*-
 """
 2.PLS_to_RAW_windows.py
 
@@ -10,85 +10,142 @@ PLS(JSONL) 결과와 RAW(JSONL) 패킷을 다음 기준으로 매핑한다.
   - ak
   - fl
 """
-
-from pathlib import Path
-from tqdm import tqdm
+import re
+import json
 import sys
-from collections import defaultdict, deque
-from typing import List, Dict, Any, Tuple
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any, List, Optional
+from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from utils.file_load import file_load
-from utils.extract_feature import pls_extract, raw_extract
+from utils.extract_feature import raw_extract
 from utils.file_save import save_jsonl
 
-def PLS_to_RAW_mapping(PLS_jsonl: Path, RAW_jsonl: Path, out_jsonl: Path):
-    file_type = "jsonl"
-    match_required = ("@timestamp", "sq", "ak", "fl")
 
-    RAW = file_load(file_type, RAW_jsonl)
-    if RAW is None:
-        print(f"RAW empty: {RAW_jsonl}")
+def parse_ts(ts: str) -> datetime:
+    s = str(ts).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return datetime.fromisoformat(s)
 
-    PLS = file_load(file_type, PLS_jsonl)
-    if PLS is None:
-        print(f"PLS empty: {PLS_jsonl}")
 
-    packet_map: Dict[Tuple[str, str, str, str], deque] = defaultdict(deque)
-    skipped_raw = 0
+def extract_timestamp_from_flow(flow: str) -> Optional[str]:
+    if not isinstance(flow, str):
+        return None
 
-    for pkt in RAW:
-        if any(pkt.get(k) in (None, "") for k in match_required):
-            skipped_raw += 1
+    m = re.search(r'timestamp="([\w\-\:\.TZ\+]+)"', flow)
+    if m:
+        return m.group(1)
+
+    m2 = re.search(r'@timestamp:\s*([\w\-\:\.TZ\+]+)', flow)
+    if m2:
+        return m2.group(1)
+
+    return None
+
+
+def load_window_pls(window_pls_file: Path) -> Dict[int, Dict[str, Any]]:
+    data = file_load("jsonl", str(window_pls_file)) or []
+    result: Dict[int, Dict[str, Any]] = {}
+
+    for obj in tqdm(data, desc="window_pls_80 로딩", ncols=90):
+        if not isinstance(obj, dict):
             continue
-        key = (str(pkt["@timestamp"]), str(pkt["sq"]), str(pkt["ak"]), str(pkt["fl"]))
-        packet_map[key].append(pkt)
+
+        win_id = obj.get("window_id")
+        if win_id is None:
+            continue
+
+        flows_info: List[Dict[str, Any]] = []
+        for flow in (obj.get("pls") or []):
+            ts_str = extract_timestamp_from_flow(flow)
+            if not ts_str:
+                continue
+            try:
+                dt = ts_str
+            except Exception:
+                continue
+            flows_info.append({"ts": dt})
+
+        result[int(win_id)] = {"flows": flows_info}
+
+    print(f"[INFO] window_pls_80 윈도우 수: {len(result):,}")
+    return result
+
+
+def load_raw_packets(raw_file: Path) -> Dict[datetime, Dict[str, Any]]:
+    raw_list = file_load("jsonl", str(raw_file)) or []
+
+    valid_records = raw_extract(raw_list, ["@timestamp"])
+    skipped_missing_ts = len(raw_list) - len(valid_records)
+
+    ts_map: Dict[datetime, Dict[str, Any]] = {}
+    skipped_parse = 0
+
+    for obj in tqdm(raw_list, desc="RAW 패킷 인덱스 구성", ncols=90):
+        if not isinstance(obj, dict):
+            continue
+
+        ts_str = obj.get("@timestamp") or obj.get("timestamp")
+        if not ts_str:
+            continue
+
+        try:
+            dt_key = ts_str
+        except Exception:
+            skipped_parse += 1
+            continue
+
+        ts_map[dt_key] = obj
+
+    print(f"[INFO] RAW 패킷 인덱스 수: {len(ts_map):,} (raw_extract 누락 {skipped_missing_ts:,}개, ts 파싱 실패 {skipped_parse:,}개)")
+    return ts_map
+
+
+def PLS_to_RAW_mapping(PLS_jsonl: Path, RAW_jsonl: Path, out_jsonl: Path):
+    window_pls = load_window_pls(PLS_jsonl)
+    raw_ts_map = load_raw_packets(RAW_jsonl)
 
     results: List[Dict[str, Any]] = []
-    matched_windows = 0
-    total_pls_lines = 0
-    no_fields_lines = 0
-    miss_match_lines = 0
+    total = len(window_pls)
+    full_matched = 0
+    dropped = 0
 
-    for pattern in tqdm(PLS, desc="PLS 매핑 중", leave=True, ncols=80):
-        window_id_from_slm = pattern.get("window_id", 0)
+    for win_id, info in tqdm(window_pls.items(), desc="윈도우 매핑 중", ncols=90):
+        flows = info.get("flows", [])
+        if not flows:
+            dropped += 1
+            continue
 
-        sequence_group = []
-        for pls_line in pattern.get("pls", []):
-            total_pls_lines += 1
-            fields = pls_extract(pls_line)
-            if not fields:
-                no_fields_lines += 1
-                continue
+        window_group: List[Dict[str, Any]] = []
+        ok = True
 
-            key = (str(fields["@timestamp"]), str(fields["sq"]), str(fields["ak"]), str(fields["fl"]))
-            dq = packet_map.get(key)
-            if dq:
-                pkt = dq.popleft()
-                pkt_copy = pkt.copy()
-                pkt_copy["match"] = "O"
-                sequence_group.append(pkt_copy)
-            else:
-                miss_match_lines += 1
+        for f in flows:
+            dt_pls = f["ts"]
+            pkt = raw_ts_map.get(dt_pls)
+            if not pkt:
+                ok = False
+                break
+            pkt_copy = dict(pkt)
+            pkt_copy["match"] = "O"
+            window_group.append(pkt_copy)
 
-        if sequence_group:
-            matched_windows += 1
-            results.append({
-                "window_id": window_id_from_slm,
-                "sequence_group": sequence_group
-            })
+        if ok and len(window_group) == len(flows):
+            full_matched += 1
+            results.append({"window_id": win_id, "sequence_group": window_group})
+        else:
+            dropped += 1
 
-    print("\n=== MAPPING SUMMARY ===")
-    print(f"raw_total={len(RAW)}, raw_skipped_missing_required={skipped_raw}")
-    print(f"pls_total_patterns={len(PLS)}")
-    print(f"pls_total_lines={total_pls_lines}, pls_no_fields={no_fields_lines}, pls_miss_match={miss_match_lines}")
-    print(f"matched_windows={matched_windows}, results={len(results)}")
+    print(f"[INFO] 총 윈도우 {total:,}개 중 완전 매핑 {full_matched:,}개, 드롭 {dropped:,}개")
 
     if out_jsonl is not None:
         save_jsonl(results, out_jsonl)
         print(f"[SAVE] results_jsonl -> {out_jsonl} (lines={len(results)})")
+
     return results
 
 
