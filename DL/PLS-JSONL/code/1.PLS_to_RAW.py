@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-1-1.PLS_to_RAW.py
+1.PLS_to_RAW.py
 
 PLS(JSONL) 결과와 RAW(JSONL) 패킷을 다음 기준으로 매핑한다.
   - @timestamp
@@ -31,16 +31,17 @@ def PLS_to_RAW_mapping(PLS_jsonl: Path, RAW_jsonl: Path, out_jsonl: Path):
     if RAW is None:
         print(f"RAW empty: {RAW_jsonl}")
 
+    valid_records = raw_extract(RAW, list(match_required))
+    skipped_raw = len(RAW) - len(valid_records)
+
     PLS = file_load(file_type, PLS_jsonl)
     if PLS is None:
         print(f"PLS empty: {PLS_jsonl}")
 
     packet_map: Dict[Tuple[str, str, str, str], deque] = defaultdict(deque)
-    skipped_raw = 0
 
     for pkt in RAW:
         if any(pkt.get(k) in (None, "") for k in match_required):
-            skipped_raw += 1
             continue
         key = (str(pkt["@timestamp"]), str(pkt["sq"]), str(pkt["ak"]), str(pkt["fl"]))
         packet_map[key].append(pkt)
@@ -100,4 +101,3 @@ if __name__ == "__main__":
     raw_path = ROOT / "data" / "RAW.jsonl"
     out_path = ROOT / "results" / "PLS_to_RAW_mapped.jsonl"
     PLS_to_RAW_mapping(pls_path, raw_path, out_path)
-

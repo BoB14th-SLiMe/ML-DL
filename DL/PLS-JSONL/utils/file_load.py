@@ -9,9 +9,6 @@ input
   - file_type : 파일 종류
   - file_path : 파일 경로
 
-output
-  - 
-  
 """
 
 import json, sys
