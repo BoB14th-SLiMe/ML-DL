@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Dict, Any, Tuple, List, Optional
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from utils.file_load import file_load
