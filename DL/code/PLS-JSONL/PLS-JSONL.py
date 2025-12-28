@@ -14,7 +14,7 @@ import importlib.util
 import argparse
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[0]
 sys.path.insert(0, str(ROOT))
 
 
