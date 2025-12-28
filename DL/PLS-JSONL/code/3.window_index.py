@@ -1,234 +1,185 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
 3.window_index.py
 
-역할:
-  - 2_window_PLS_to_Raw_result.jsonl : window_id 별 RAW 패킷 전체
-      {"window_id": 1, "RAW": [ {...}, {...}, ... ]}
-
-  - 1-1_PLS_to_Raw_result.jsonl : 패턴 라벨 + 부분 패킷(window_group)
-      {
-        "window_id": 1,
-        "pattern": "P_0021",         # 또는 "label"
-        "description": "...",        # (있으면)
-        "window_group": [ {...}, ... ]
-      }
-
-  → 각 1-1 라인에 "index": [...] 를 추가.
-    - index[i] 는 해당 window_id 의 RAW 리스트에서
-      window_group[i] 패킷이 위치한 인덱스(0-based).
-
-  → 결과에는 pattern / description 도 함께 포함해서 넘김.
-     (1-1에 pattern이 없고 label만 있으면 pattern에 label을 복사)
-
-추가 동작:
-  - pattern(또는 label)이 "noise" (대소문자 무시) 인 윈도우는 출력에서 제외
-  - window_group 중 하나라도 RAW에 매핑되지 않으면
-    해당 윈도우 전체를 버림 (결과 파일에는 포함되지 않음)
-
-사용 예:
-  python 3.window_index.py \
-      --raw-jsonl 2_window_PLS_to_Raw_result.jsonl \
-      --pls-jsonl 1-1_PLS_to_Raw_result.jsonl \
-      --output-jsonl 1-2_PLS_to_Raw_with_index.jsonl
+SLM이 추출한 패턴(PLS/sequence_group) 내 각 패킷이,
+해당 window의 sequence_group(=RAW 매핑된 윈도우 패킷 리스트)에서 몇 번째 위치(index)에 존재하는지 파악해
+패턴 레코드에 "index" 필드를 추가한다.
 """
 
-import json
-import argparse
+import sys
+import re
 from pathlib import Path
-from collections import defaultdict
+from typing import Dict, Any, Tuple, List, Optional
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from utils.file_load import file_load
+from utils.extract_feature import raw_extract
+from utils.file_save import save_jsonl
+
+Key = Tuple[str, str, str, str]
 
 
-# -------------------------------
-# 패킷 매칭에 사용할 키 생성
-# (여기서는 timestamp 사용)
-# -------------------------------
-KEY_FIELDS = [
-    "@timestamp",
-]
+def load_window(window_records: List[Dict[str, Any]]) -> Dict[str, Dict[Key, List[int]]]:
+    window_to_key_indices: Dict[str, Dict[Key, List[int]]] = {}
 
+    total_obj = 0
+    skipped_no_window_id = 0
+    skipped_bad_group = 0
+    total_pkt = 0
+    dict_pkt = 0
+    str_pkt = 0
+    other_pkt = 0
+    key_none = 0
+    example_bad_pkt: Optional[str] = None
 
-def build_packet_key(pkt: dict):
-    """패킷 dict -> 매칭용 튜플 키
+    for window in window_records:
+        total_obj += 1
 
-    없는 필드는 빈 문자열로 채우고,
-    값은 모두 str로 변환해서 비교의 일관성을 유지.
-    """
-    return tuple(str(pkt.get(f, "")) for f in KEY_FIELDS)
+        window_id = window.get("window_id")
+        if window_id is None:
+            skipped_no_window_id += 1
+            continue
 
+        seq = window.get("sequence_group")
+        if not isinstance(seq, list):
+            skipped_bad_group += 1
+            continue
 
-# -------------------------------
-# 2_window 파일로부터 index 맵 구성
-# -------------------------------
-def build_raw_index_map(raw_jsonl_path: Path):
-    """
-    return:
-      raw_index_map: dict[
-          window_id -> dict[
-              packet_key(tuple) -> list[index(int)]
-          ]
-      ]
-    """
-    raw_index_map = defaultdict(lambda: defaultdict(list))
+        key_map = window_to_key_indices.setdefault(window_id, {})
 
-    with raw_jsonl_path.open("r", encoding="utf-8") as f:
-        for line_no, line in enumerate(f, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"[ERROR] JSON 파싱 실패 (line {line_no}) in {raw_jsonl_path}: {e}"
-                )
+        for i, pkt in enumerate(seq):
+            total_pkt += 1
+            if isinstance(pkt, dict):
+                dict_pkt += 1
+            elif isinstance(pkt, str):
+                str_pkt += 1
+            else:
+                other_pkt += 1
 
-            window_id = obj["window_id"]
-            raw_list = obj.get("RAW", [])
+            key = raw_extract(pkt, ["@timestamp", "sq", "ak", "fl"])
 
-            for idx, pkt in enumerate(raw_list):
-                key = build_packet_key(pkt)
-                raw_index_map[window_id][key].append(idx)
-
-    return raw_index_map
-
-
-# -------------------------------
-# 1-1 파일에 index 추가
-# -------------------------------
-def add_index_to_pls_raw(
-    pls_jsonl_path: Path,
-    raw_index_map,
-    output_path: Path,
-):
-    missing_count = 0          # 매핑 실패한 패킷 수 (스킵한 이유)
-    total_pkt_considered = 0   # noise 제외하고, 매핑 시도한 패킷 수
-    total_windows = 0          # noise 제외하고, 매핑 시도한 윈도우 수
-    written_windows = 0        # 실제로 출력된 윈도우 수
-    skipped_noise = 0          # pattern / label == "noise" 로 스킵된 윈도우 수
-    skipped_unmatched = 0      # 매핑 실패로 스킵된 윈도우 수
-
-    with pls_jsonl_path.open("r", encoding="utf-8") as fin, \
-            output_path.open("w", encoding="utf-8") as fout:
-
-        for line_no, line in enumerate(fin, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"[ERROR] JSON 파싱 실패 (line {line_no}) in {pls_jsonl_path}: {e}"
-                )
-
-            # 1) pattern / description 정규화
-            #    - pattern: obj["pattern"] 이 있으면 그대로, 없으면 label 사용
-            #    - description: obj["description"] 없으면 label 로 fallback
-            pattern_raw = obj.get("pattern") or obj.get("label") or ""
-            description = obj.get("description") or obj.get("label") or ""
-
-            # noise 패턴은 아예 버림 (대소문자 무시)
-            pattern_lower = str(pattern_raw).strip().lower()
-            if pattern_lower == "noise":
-                skipped_noise += 1
+            if key is None:
+                key_none += 1
+                if example_bad_pkt is None:
+                    example_bad_pkt = str(pkt)[:200]
                 continue
 
-            window_id = obj["window_id"]
-            window_group = obj.get("window_group", [])
+            key_map.setdefault(key, []).append(i)
 
-            total_windows += 1
-            total_pkt_considered += len(window_group)
+    print("[load_window] summary")
+    print(f"  total_obj={total_obj}")
+    print(f"  windows_built={len(window_to_key_indices)}")
+    print(f"  skipped_no_window_id={skipped_no_window_id}")
+    print(f"  skipped_bad_sequence_group={skipped_bad_group}")
+    print(f"  total_pkt={total_pkt} (dict={dict_pkt}, str={str_pkt}, other={other_pkt}), key_none={key_none}")
+    if example_bad_pkt is not None:
+        print(f"  example_unparsable_pkt={example_bad_pkt}")
 
-            per_window_map = raw_index_map.get(window_id, {})
-
-            index_list = []
-            unmatched_flag = False
-
-            for pkt in window_group:
-                key = build_packet_key(pkt)
-                idx_list = per_window_map.get(key)
-
-                if idx_list:
-                    # RAW에서 해당 키로 찾은 첫 번째 인덱스를 사용
-                    idx = idx_list[0]
-                    index_list.append(idx)
-                else:
-                    # 매핑 실패 → 이 윈도우 전체를 버림
-                    index_list.append(-1)
-                    missing_count += 1
-                    unmatched_flag = True
-
-            # 하나라도 매핑 실패가 있으면 이 윈도우는 통째로 스킵
-            if unmatched_flag:
-                skipped_unmatched += 1
-                continue
-
-            # 여기까지 왔다는 건 모든 패킷이 RAW에 매핑 성공했다는 뜻
-            # ★ pattern / description 을 결과에도 명시적으로 포함
-            obj["pattern"] = pattern_raw
-            obj["description"] = description
-            obj["index"] = index_list
-
-            # (옵션) 각 패킷 dict 안에 raw_index를 넣고 싶다면 아래 주석 해제
-            # for pkt, idx in zip(window_group, index_list):
-            #     pkt["raw_index"] = idx
-
-            fout.write(json.dumps(obj, ensure_ascii=False) + "\n")
-            written_windows += 1
-
-    print(f"[INFO] noise 패턴으로 스킵된 윈도우 수: {skipped_noise}")
-    print(f"[INFO] 매핑 시도한 윈도우 수 (noise 제외): {total_windows}")
-    print(f"[INFO] 완전히 매핑되어 출력된 윈도우 수: {written_windows}")
-    print(f"[INFO] 매핑 실패로 스킵된 윈도우 수: {skipped_unmatched}")
-    print(f"[INFO] 매핑 시도한 패킷 수 (noise 제외): {total_pkt_considered}")
-    print(f"[INFO] 매칭 실패 패킷 수(스킵 이유): {missing_count}")
+    return window_to_key_indices
 
 
-# -------------------------------
-# main
-# -------------------------------
-def main():
-    parser = argparse.ArgumentParser(
-        description="1-1_PLS_to_Raw_result.jsonl 에 RAW index 를 추가하는 스크립트 (3.window_index.py)"
-    )
-    parser.add_argument(
-        "--raw-jsonl",
-        type=Path,
-        required=True,
-        help="2_window_PLS_to_Raw_result.jsonl 경로",
-    )
-    parser.add_argument(
-        "--pls-jsonl",
-        type=Path,
-        required=True,
-        help="1-1_PLS_to_Raw_result.jsonl 경로",
-    )
-    parser.add_argument(
-        "--output-jsonl",
-        type=Path,
-        required=True,
-        help="index 추가된 JSONL 출력 경로",
-    )
+def insert_index(
+    pattern_records: List[Dict[str, Any]],
+    window_index: Dict[str, Dict[Key, List[int]]],
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
 
-    args = parser.parse_args()
+    total = 0
+    written = 0
+    skipped_noise = 0
+    skipped_no_window_id = 0
+    skipped_bad_group = 0
+    skipped_no_window_map = 0
+    skipped_unmatched = 0
+    example_missing_window: Optional[str] = None
 
-    print(f"[INFO] RAW 인덱스 맵 생성 중: {args.raw_jsonl}")
-    raw_index_map = build_raw_index_map(args.raw_jsonl)
+    for obj in pattern_records:
+        total += 1
 
-    print(f"[INFO] 1-1 파일에 index 추가 중: {args.pls_jsonl}")
-    add_index_to_pls_raw(args.pls_jsonl, raw_index_map, args.output_jsonl)
+        label = obj.get("pattern") or obj.get("label") or ""
+        if str(label).strip().lower() == "noise":
+            skipped_noise += 1
+            continue
 
-    print(f"[DONE] 결과 저장: {args.output_jsonl}")
+        window_id = obj.get("window_id")
+        if window_id is None:
+            skipped_no_window_id += 1
+            continue
 
+        seq = obj.get("sequence_group")
+        if not isinstance(seq, list):
+            skipped_bad_group += 1
+            continue
+
+        per_window = window_index.get(window_id)
+        if not per_window:
+            skipped_no_window_map += 1
+            if example_missing_window is None:
+                example_missing_window = window_id
+            continue
+
+        used_cursor: Dict[Key, int] = {}
+        idxs: List[int] = []
+        ok = True
+
+        for pkt in seq:
+            key = raw_extract(pkt, ["@timestamp", "sq", "ak", "fl"])
+            if key is None:
+                ok = False
+                break
+
+            candidates = per_window.get(key)
+            if not candidates:
+                ok = False
+                break
+
+            k = used_cursor.get(key, 0)
+            if k >= len(candidates):
+                ok = False
+                break
+
+            idxs.append(candidates[k])
+            used_cursor[key] = k + 1
+
+        if not ok:
+            skipped_unmatched += 1
+            continue
+
+        obj["index"] = idxs
+        out.append(obj)
+        written += 1
+
+    print("[insert_index] summary")
+    print(f"  total_records={total}")
+    print(f"  written={written}")
+    print(f"  skipped_noise={skipped_noise}")
+    print(f"  skipped_no_window_id={skipped_no_window_id}")
+    print(f"  skipped_bad_sequence_group={skipped_bad_group}")
+    print(f"  skipped_no_window_map={skipped_no_window_map}")
+    print(f"  skipped_unmatched={skipped_unmatched}")
+    if example_missing_window is not None:
+        print(f"  example_window_id_missing_in_window_index={example_missing_window}")
+
+    return out
+
+def window_index(pattern_jsonl: Path, window_jsonl: Path, out_jsonl: Path):
+    window_records = file_load("jsonl", str(window_jsonl))
+    pattern_records = file_load("jsonl", str(pattern_jsonl))
+
+    window_index = load_window(window_records)
+    results = insert_index(pattern_records, window_index)
+
+    save_jsonl(results, out_jsonl)
+    print(f"결과 : {len(results)} -> {out_jsonl}")
 
 if __name__ == "__main__":
-    main()
+    pattern_path = ROOT / "results" / "PLS_to_RAW_mapped.jsonl"
+    window_path = ROOT / "results" / "PLS_to_RAW_windows_mapped.jsonl"
+    out_path = ROOT / "results" / "pattern.jsonl"
 
+    window_index(pattern_path, window_path, out_path)
 
-"""
-python 3.window_index.py --raw-jsonl ../result/2_window_PLS_to_Raw_result.jsonl --pls-jsonl ../result/1-1_PLS_to_Raw_result.jsonl --output-jsonl ../../preprocessing/data/pattern_windows.jsonl
-
-"""
