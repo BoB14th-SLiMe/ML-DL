@@ -1,0 +1,20 @@
+modules:
+  step1_pls_to_raw: "code/1.PLS_to_RAW.py"
+  step2_pls_to_raw_windows: "code/2.PLS_to_RAW_windows.py"
+  step3_window_index: "code/3.window_index.py"
+
+paths:
+  step1:
+    pls: "data/PLS.jsonl"
+    raw: "data/RAW.jsonl"
+    out: "results/PLS_to_RAW_mapped.jsonl"
+
+  step2:
+    pls: "data/window_pls_80.jsonl"
+    raw: "data/RAW.jsonl"
+    out: "results/PLS_to_RAW_windows_mapped.jsonl"
+
+  step3:
+    pattern: "results/PLS_to_RAW_mapped.jsonl"
+    window: "results/PLS_to_RAW_windows_mapped.jsonl"
+    out: "results/pattern.jsonl"
