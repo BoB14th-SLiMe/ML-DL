@@ -10,7 +10,7 @@ import re
 from collections import Counter
 
 import re
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple, Sequence, Union, overload
 
 _TS_RE = re.compile(r'@timestamp\s*[:=]\s*"?([0-9T:\.\-Z\+]+)"?')
 _SQ_RE = re.compile(r'\bsq\s*[:=]\s*"?([^",>\s]+)"?')
@@ -59,43 +59,77 @@ def timestamp_extract(pls_line: str) -> Optional[str]:
     return None
 
 
-def raw_extract(RAW: list, required: list):
-  skipped = 0
-  missing_by_key = Counter()
-  missing_by_key_reason = Counter() 
-  valid_records = []
 
-  for i, raw in enumerate(RAW):
-    missing = []
-    for key in required:
-      v = raw.get(key)
-      if v is None:
-        missing.append((key, "None"))
-      elif v == "":
-        missing.append((key, "empty"))
+RawRecord = Dict[str, Any]
+ValidTuple = Tuple[Any, ...]
 
-    if missing:
-      skipped += 1
-      print(f"[SKIP] idx={i} missing={missing}")
+@overload
+def raw_extract(RAW: List[RawRecord], required: Sequence[str]) -> List[ValidTuple]: ...
+@overload
+def raw_extract(RAW: RawRecord, required: Sequence[str]) -> Union[ValidTuple, None]: ...
 
-      for key, reason in missing:
-        missing_by_key[key] += 1
-        missing_by_key_reason[(key, reason)] += 1
-      continue
 
-    valid_records.append(tuple(raw[k] for k in required))
-  
-  print("\n=== MISSING SUMMARY ===")
-  print(f"number of skipped_record: {skipped}")
- 
-  if (skipped > 0):
+def raw_extract(
+    RAW: Union[List[RawRecord], RawRecord],
+    required: Sequence[str],
+) -> Union[List[ValidTuple], ValidTuple, None]:
+    """
+    - RAW가 list[dict]면: (유효 레코드들) -> list[tuple] 반환 + 요약 출력(1회)
+    - RAW가 dict(단일 레코드)면: 유효하면 tuple, 아니면 None 반환 (출력 없음)
+    """
+
+    if isinstance(required, (str, bytes, bytearray)):
+        raise TypeError("required must be a sequence of keys, not a string.")
+
+    if isinstance(RAW, dict):
+        for k in required:
+            v = RAW.get(k)
+            if v is None or v == "":
+                return None
+        return tuple(RAW[k] for k in required)
+
+    if not isinstance(RAW, list):
+        raise TypeError(f"RAW must be list or dict. got={type(RAW)}")
+
+    skipped = 0
+    missing_by_key = Counter()
+    missing_by_key_reason = Counter()
+    valid_records: List[ValidTuple] = []
+
+    for i, raw in enumerate(RAW):
+        if not isinstance(raw, dict):
+            skipped += 1
+            missing_by_key["__not_dict__"] += 1
+            missing_by_key_reason[("__not_dict__", str(type(raw)))] += 1
+            continue
+
+        missing = []
+        for key in required:
+            v = raw.get(key)
+            if v is None:
+                missing.append((key, "None"))
+            elif v == "":
+                missing.append((key, "empty"))
+
+        if missing:
+            skipped += 1
+            for key, reason in missing:
+                missing_by_key[key] += 1
+                missing_by_key_reason[(key, reason)] += 1
+            continue
+
+        valid_records.append(tuple(raw[k] for k in required))
+
+    print("\n=== MISSING SUMMARY ===")
     print(f"number of skipped_record: {skipped}")
-    print("\n=== missing by key (record count) ===")
-    for k, n in missing_by_key.items():
-      print(f"{k}: {n}")
 
-    print("\n=== MISSING BY KEY/REASON (record count) ===")
-    for (k, reason), n in missing_by_key_reason.items():
-      print(f"{k}/{reason}: {n}")
+    if skipped > 0:
+        print("\n=== missing by key (record count) ===")
+        for k, n in missing_by_key.items():
+            print(f"{k}: {n}")
 
-  return valid_records
+        print("\n=== MISSING BY KEY/REASON (record count) ===")
+        for (k, reason), n in missing_by_key_reason.items():
+            print(f"{k}/{reason}: {n}")
+
+    return valid_records
