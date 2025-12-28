@@ -22,37 +22,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from utils.file_load import file_load
-from utils.extract_feature import raw_extract
+from utils.extract_feature import raw_extract, timestamp_extract
 from utils.file_save import save_jsonl
-
-
-def parse_ts(ts: str) -> datetime:
-    s = str(ts).strip()
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    return datetime.fromisoformat(s)
-
-
-def extract_timestamp_from_flow(flow: str) -> Optional[str]:
-    if not isinstance(flow, str):
-        return None
-
-    m = re.search(r'timestamp="([\w\-\:\.TZ\+]+)"', flow)
-    if m:
-        return m.group(1)
-
-    m2 = re.search(r'@timestamp:\s*([\w\-\:\.TZ\+]+)', flow)
-    if m2:
-        return m2.group(1)
-
-    return None
 
 
 def load_window_pls(window_pls_file: Path) -> Dict[int, Dict[str, Any]]:
     data = file_load("jsonl", str(window_pls_file)) or []
     result: Dict[int, Dict[str, Any]] = {}
 
-    for obj in tqdm(data, desc="window_pls_80 로딩", ncols=90):
+    for obj in tqdm(data, desc="window_pls 로딩", ncols=50):
         if not isinstance(obj, dict):
             continue
 
@@ -62,18 +40,15 @@ def load_window_pls(window_pls_file: Path) -> Dict[int, Dict[str, Any]]:
 
         flows_info: List[Dict[str, Any]] = []
         for flow in (obj.get("pls") or []):
-            ts_str = extract_timestamp_from_flow(flow)
+            ts_str = timestamp_extract(flow)
             if not ts_str:
                 continue
-            try:
-                dt = ts_str
-            except Exception:
-                continue
-            flows_info.append({"ts": dt})
+
+            flows_info.append({"ts": ts_str})
 
         result[int(win_id)] = {"flows": flows_info}
 
-    print(f"[INFO] window_pls_80 윈도우 수: {len(result):,}")
+    print(f"총 window 개수: {len(result):,}")
     return result
 
 
@@ -86,23 +61,15 @@ def load_raw_packets(raw_file: Path) -> Dict[datetime, Dict[str, Any]]:
     ts_map: Dict[datetime, Dict[str, Any]] = {}
     skipped_parse = 0
 
-    for obj in tqdm(raw_list, desc="RAW 패킷 인덱스 구성", ncols=90):
+    for obj in tqdm(raw_list, desc="RAW 패킷 인덱스 로딩", ncols=50):
         if not isinstance(obj, dict):
             continue
-
-        ts_str = obj.get("@timestamp") or obj.get("timestamp")
+        ts_str = obj.get("@timestamp")
         if not ts_str:
             continue
+        ts_map[ts_str] = obj
 
-        try:
-            dt_key = ts_str
-        except Exception:
-            skipped_parse += 1
-            continue
-
-        ts_map[dt_key] = obj
-
-    print(f"[INFO] RAW 패킷 인덱스 수: {len(ts_map):,} (raw_extract 누락 {skipped_missing_ts:,}개, ts 파싱 실패 {skipped_parse:,}개)")
+    print(f"RAW 패킷 개수: {len(ts_map):,} (raw_extract 누락 {skipped_missing_ts:,}개, ts 파싱 실패 {skipped_parse:,}개)")
     return ts_map
 
 
@@ -140,11 +107,11 @@ def PLS_to_RAW_mapping(PLS_jsonl: Path, RAW_jsonl: Path, out_jsonl: Path):
         else:
             dropped += 1
 
-    print(f"[INFO] 총 윈도우 {total:,}개 중 완전 매핑 {full_matched:,}개, 드롭 {dropped:,}개")
+    print(f"총 윈도우 {total:,}개 중 완전 매핑 {full_matched:,}개, 드롭 {dropped:,}개")
 
     if out_jsonl is not None:
         save_jsonl(results, out_jsonl)
-        print(f"[SAVE] results_jsonl -> {out_jsonl} (lines={len(results)})")
+        print(f"결과 저장 : {out_jsonl} (lines={len(results)})")
 
     return results
 
