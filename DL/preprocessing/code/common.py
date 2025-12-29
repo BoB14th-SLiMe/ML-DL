@@ -3,7 +3,6 @@
 
 """
 common.py  
-A버전: MAC+IP 묶어서 host 단위 embedding
 
 두 가지 모드 제공:
   --fit        : host_map + norm_params 생성 후 common.npy 저장
@@ -21,12 +20,14 @@ A버전: MAC+IP 묶어서 host 단위 embedding
   - len      : TCP 이후 payload의 길이
 
 출력 feature (common.npy, structured numpy):
-  - src_host_id (int32)  : (smac, sip) 조합 → ID, Embedding용
-  - dst_host_id (int32)  : (dmac, dip) 조합 → ID, Embedding용
-  - sp_norm    (float32) : sp min-max 정규화
-  - dp_norm    (float32) : dp min-max 정규화
-  - dir_code   (float32) : request=1.0, 그 외=0.0
-  - len_norm   (float32) : len min-max 정규화
+  - src_host_id   (int32)   : (smac, sip) 조합 → ID, Embedding용
+  - dst_host_id   (int32)   : (dmac, dip) 조합 → ID, Embedding용
+  - sp_norm       (float32) : sp min-max 정규화
+  - dp_norm       (float32) : dp min-max 정규화
+  - dir_code      (float32) : request=1.0, 그 외=0.0
+  - len_norm      (float32) : len min-max 정규화
+  - protocol      (float32) : protocol 번호
+  - protocol_norm (float32) : protocol min-max정규화
 
 """
 import json, sys
