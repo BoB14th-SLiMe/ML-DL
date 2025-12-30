@@ -7,7 +7,8 @@ def _to_int(value: Any) -> int:
         if value in (None, ""):
             return None
         return int(value)
-    except Exception:
+    except Exception as e:
+        print(f"{e} (change_vlaue_type.py)")
         return None
     
 def _to_float(value: Any) -> float:
@@ -15,11 +16,24 @@ def _to_float(value: Any) -> float:
         if value in (None, ""):
             return None
         return float(value)
-    except Exception:
+    except Exception as e:
+        print(f"{e} (change_vlaue_type.py)")
         return None
 
 def _hex_to_int(hex_str: str) -> int:
-    return int(hex_str, 16)
+    try:
+        if hex_str in (None, ""):
+            return None
+        return int(hex_str, 16)
+    except Exception as e:
+        print(f"{e} (change_vlaue_type.py)")
+        return None
 
 def _hex_to_float(hex_str: str) -> float:
-    return float(int(hex_str, 16))
+    try:
+        if hex_str in (None, ""):
+            return None
+        return float(int(hex_str, 16))
+    except Exception as e:
+        print(f"{e} (change_vlaue_type.py)")
+        return None
