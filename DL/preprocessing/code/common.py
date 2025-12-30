@@ -39,25 +39,12 @@ from typing import Any, Dict
 
 from min_max_normalize import minmax_cal, minmax_norm_scalar
 from change_value_type import _to_float
+from ip_mac import get_ip_mac_id_from_vocab
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from utils.file_load import file_load
-
-
-# ip, mac merge
-def merge_ip_mac(ip:str, mac:str) -> str:
-    if ip is None or mac is None:
-        return None
-    ip_mac = f"{ip}|{mac}"
-    return str(ip_mac)
-
-def get_ip_mac_id_from_vocab(vocab: Dict[str, int], mac: Any, ip: Any) -> int:
-    token = merge_ip_mac(ip, mac)
-    if not token:
-        return -1
-    return int(vocab.get(token, -1))
 
 # dir mapping
 def dir_str_to_float(dir:str) -> float:
