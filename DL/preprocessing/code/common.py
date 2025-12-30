@@ -35,32 +35,16 @@ import argparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Any, Dict, Optional, Set, Tuple, List
+from typing import Any, Dict
 
 from min_max_normalize import minmax_cal, minmax_norm_scalar
+from change_value_type import _to_float
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from utils.file_load import file_load
-from utils.file_save import save_jsonl
 
-# 형변환
-def _to_int(value: Any) -> int:
-    try:
-        if value in (None, ""):
-            return None
-        return int(value)
-    except Exception:
-        return None
-    
-def _to_float(value: Any) -> float:
-    try:
-        if value in (None, ""):
-            return None
-        return float(value)
-    except Exception:
-        return None
 
 # ip, mac merge
 def merge_ip_mac(ip:str, mac:str) -> str:
@@ -228,18 +212,18 @@ def fit_preprocess_common(input_path: Path, out_dir: Path):
 
     np.save(out_dir / "common.npy", data)
 
-    # print("\n===== 앞 5개 전처리 샘플 =====")
-    # for i in range(min(5, len(data))):
-    #     print({
-    #         "src_host_id": int(data["src_host_id"][i]),
-    #         "dst_host_id": int(data["dst_host_id"][i]),
-    #         "sp_norm":     float(data["sp_norm"][i]),
-    #         "dp_norm":     float(data["dp_norm"][i]),
-    #         "dir_code":    float(data["dir_code"][i]),
-    #         "len_norm":    float(data["len_norm"][i]),
-    #         "protocol":    float(data["protocol"][i]),
-    #         "protocol_norm":    float(data["protocol_norm"][i]),
-    #     })
+    print("\n===== 앞 5개 전처리 샘플 =====")
+    for i in range(min(5, len(data))):
+        print({
+            "src_host_id": int(data["src_host_id"][i]),
+            "dst_host_id": int(data["dst_host_id"][i]),
+            "sp_norm":     float(data["sp_norm"][i]),
+            "dp_norm":     float(data["dp_norm"][i]),
+            "dir_code":    float(data["dir_code"][i]),
+            "len_norm":    float(data["len_norm"][i]),
+            "protocol":    float(data["protocol"][i]),
+            "protocol_norm":    float(data["protocol_norm"][i]),
+        })
 
 # 단일 패킷 전처리 함수 (운영 단계에서 사용)
 def preprocess_common(records: Dict[str, Any], vocab: Dict[str, int], norm_params: Dict[str, Any]) -> Dict[str, Any]:
