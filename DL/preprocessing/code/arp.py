@@ -146,8 +146,9 @@ def preprocess_arp(records: Dict[str, Any], vocab: Dict[str, int], norm_params: 
     op_min, op_max = _to_float(norm_params.get("arp.op_min")), _to_float(norm_params.get("arp.op_max"))
 
     return {
-        "arp_src_host_id": int(src_id),
-        "arp_tgt_host_id": int(tgt_id),
+        "arp_src_host_id" : int(src_id),
+        "arp_tgt_host_id" : int(tgt_id),
+        "arp_op_num"      : float(minmax_cal(op_float, op_min, op_max)),
     }
 
 def transform_preprocess_arp(packet: Dict[str, Any], param_dir: Path) -> Dict[str, Any]:
