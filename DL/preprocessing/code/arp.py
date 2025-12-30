@@ -8,16 +8,16 @@ arp.py
   --transform  : 기존 host_map + norm_params 사용
 
 입력 JSONL에서 사용하는 필드:
-  - smac : 소스 MAC
-  - tmac : 목적지 MAC
-  - sip  : 소스 IP
-  - tip  : 목적지 IP
-  - op   : arp 패킷의 목적
+  - arp.smac : 소스 MAC
+  - arp.tmac : 목적지 MAC
+  - arp.sip  : 소스 IP
+  - arp.tip  : 목적지 IP
+  - arp.op   : arp 패킷의 목적
   
 출력 feature (arp.npy, structured numpy):
-  - arp_src_host_id   (int32)  : (smac, sip) 조합 → ID, Embedding용
-  - arp_tgt_host_id   (int32)  : (dmac, dip) 조합 → ID, Embedding용
-  - arp_op_num       (float32) : sp min-max 정규화
+  - arp_src_host_id   (int32)  : (arp.smac, arp.sip) 조합 → ID, Embedding용
+  - arp_tgt_host_id   (int32)  : (arp.tmac, arp.tip) 조합 → ID, Embedding용
+  - arp_op_num       (float32) : arp.op min-max 정규화
 
 """
 import json, sys
