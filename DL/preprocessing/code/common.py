@@ -109,7 +109,7 @@ def fit_preprocess_common(input_path: Path, out_dir: Path):
 
     n = len(df)
 
-    # ---------- 1) ip|mac 토큰 (벡터화 + 컬럼 누락 방어 + 빈값 방어) ----------
+    # ---------- 1) ip|mac 토큰 ----------
     sip  = df.get("sip",  pd.Series([pd.NA]*n, index=df.index, dtype="string")).astype("string").str.strip()
     smac = df.get("smac", pd.Series([pd.NA]*n, index=df.index, dtype="string")).astype("string").str.strip()
     dip  = df.get("dip",  pd.Series([pd.NA]*n, index=df.index, dtype="string")).astype("string").str.strip()
@@ -131,7 +131,7 @@ def fit_preprocess_common(input_path: Path, out_dir: Path):
     df["src_host_id"] = np.where(src_codes == -1, -1, src_codes + 1).astype("int32")
     df["dst_host_id"] = np.where(dst_codes == -1, -1, dst_codes + 1).astype("int32")
 
-    # ---------- 2) dir_code (벡터화) ----------
+    # ---------- 2) dir_code ----------
     dir_series = df.get("dir", pd.Series([pd.NA]*n, index=df.index, dtype="string")).astype("string").str.strip()
     df["dir_code"] = np.select(
         [dir_series == "request", dir_series == "response"],
@@ -139,10 +139,10 @@ def fit_preprocess_common(input_path: Path, out_dir: Path):
         default=-1.0
     ).astype("float32")
 
-    # ---------- 3) min-max 파라미터 산출 (당신 함수 사용) ----------
+    # ---------- 3) min-max 파라미터 산출 ----------
     norm_params = minmax_norm_scalar(df, norm_cols)
-
-    # ---------- 4) min-max 정규화 적용 (당신 minmax_cal 사용) ----------
+    print (norm_params)
+    # ---------- 4) min-max 정규화 적용 ----------
     vminmax = np.vectorize(minmax_cal, otypes=[np.float32])
     for col in norm_cols:
         series = pd.to_numeric(
