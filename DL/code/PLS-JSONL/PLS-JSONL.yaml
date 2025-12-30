@@ -5,13 +5,13 @@ modules:
 
 paths:
   step1:
-    pls: "../../data/PLS-JSONL/PLS.jsonl"
-    raw: "../../data/PLS-JSONL/RAW.jsonl"
+    pls: "../../data/PLS.jsonl"
+    raw: "../../data/RAW.jsonl"
     out: "../../results/PLS-JSONL/PLS_to_RAW_mapped.jsonl"
 
   step2:
-    pls: "../../data/PLS-JSONL/window_pls_80.jsonl"
-    raw: "../../data/PLS-JSONL/RAW.jsonl"
+    pls: "../../data/window_pls_80.jsonl"
+    raw: "../../data/RAW.jsonl"
     out: "../../results/PLS-JSONL/PLS_to_RAW_windows_mapped.jsonl"
 
   step3:

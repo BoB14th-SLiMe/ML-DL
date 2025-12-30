@@ -34,7 +34,7 @@ def file_load(file_type: str, file_path: str):
 def json_load(file_path: str):
   try:
     path_validation(file_path)
-    return json.loads(Path(file_path).read_text())  
+    return json.loads(Path(file_path).read_text(encoding="utf-8-sig"))  
   except Exception as e:
     print(f"{e}")
 
