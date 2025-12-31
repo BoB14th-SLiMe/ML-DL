@@ -1,735 +1,345 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-preprocess_xgt_fen_embed.py
-A버전: xgt_fen 전용 embedding/feature 전처리 + 간단 정규화
+xgt.py
 
-두 모드 제공:
-  --fit        : xgt_var_vocab + 정규화 파라미터 생성 후 xgt_fen.npy 저장
-  --transform  : 기존 xgt_var_vocab + 정규화 파라미터 사용
+두 가지 모드 제공:
+  --fit       : var_vocab + norm_params 생성 후 xgt.npy 저장
+  --transform : 기존 var_vocab + norm_params 사용
 
 입력 JSONL에서 사용하는 필드:
-  - protocol == "xgt_fen"
-  - xgt_fen.vars      : list[str] 또는 "R17,R20" 같은 str
-  - xgt_fen.source    : int 또는 "0x11" 같은 hex 문자열
-  - xgt_fen.fenetpos  : int 또는 "0x01" 같은 hex 문자열 (상위 4bit = base, 하위 4bit = slot)
-  - xgt_fen.cmd       : int 또는 "0x0054" 같은 hex 문자열
-  - xgt_fen.dtype     : int 또는 "0x0014" (또는 xgt_fen.dype)
-  - xgt_fen.blkcnt    : int
-  - xgt_fen.datasize  : int
-  - xgt_fen.errstat   : int 또는 "0x0000" 같은 hex 문자열
-  - xgt_fen.data      : list[str] 또는 str (hex string)
+  - xgt_fen.source            : xgt 소스 정보
+  - xgt_fen.fenetpos          : xgt FEnet 포지션 
+  - xgt_fen.cmd               : xgt 명령어 코드 
+  - xgt_fen.dtype             : xgt 데이터 타입
+  - xgt_fen.blkcnt            : xgt 블록 개수
+  - xgt_fen.errstat           : xgt 에러 상태 
+  - xgt_fen.datasize          : xgt 데이터 크기
+  - xgt_fen.vars              : xgt 변수 이름
+  - xgt_fen.word_value        : xgt 레지스터 값 
+#   - xgt_fen.translated_addr : xgt 레지스터 이름
 
-출력:
-  - xgt_fen.npy (structured numpy 배열)
-  - xgt_var_vocab.json (변수 이름 → ID)
-  - xgt_fen_norm_params.json (정규화용 min/max)
-
-xgt_fen.npy dtype (각 필드는 이미 아래 규칙대로 스케일링됨):
-  - xgt_var_id         (int32)   ← vars[0] → ID, Embedding용 (정규화 X)
-  - xgt_var_cnt        (float32) ← Min-Max 정규화
-  - xgt_source         (float32) ← Min-Max 정규화
-  - xgt_fenet_base     (float32) ← Min-Max 정규화
-  - xgt_fenet_slot     (float32) ← Min-Max 정규화
-  - xgt_cmd            (float32) ← Min-Max 정규화
-  - xgt_dtype          (float32) ← Min-Max 정규화
-  - xgt_blkcnt         (float32) ← Min-Max 정규화
-  - xgt_err_flag       (float32) (0.0 / 1.0, 정규화 X)
-  - xgt_err_code       (float32) ← Min-Max 정규화
-  - xgt_datasize       (float32) ← Min-Max 정규화
-  - xgt_data_missing   (float32) (0.0 / 1.0, datasize>0 & data 없음이면 1.0)
-  - xgt_data_len_chars (float32) ← Min-Max 정규화
-  - xgt_data_num_spaces(float32) ← Min-Max 정규화
-  - xgt_data_is_hex    (float32) (0.0 / 1.0, 정규화 X)
-  - xgt_data_n_bytes   (float32) ← Min-Max 정규화
-  - xgt_data_zero_ratio(float32) (0.0 ~ 1.0, 정규화 X)
-  - xgt_data_first_byte(float32) (0~1, 원래 0~255를 /255.0)
-  - xgt_data_last_byte (float32) (0~1, 원래 0~255를 /255.0)
-  - xgt_data_mean_byte (float32) (0~1, 원래 0~255를 /255.0)
-  - xgt_data_bucket    (float32) (hash bucket, 정규화 X)
-
-실시간 / 단일 패킷 처리:
-  - xgt_var_vocab.json, xgt_fen_norm_params.json 로드 후
-    preprocess_xgt_fen_with_norm(obj, var_map, norm_params) 호출
+출력 feature (xgt.npy, structured numpy):
+  - xgt_var_id            : vars[0] → vocab ID (int32, 정규화 X)
+  - xgt_var_cnt_norm      : vars 개수 min-max 정규화
+  - xgt_source_norm       : source min-max 정규화
+  - xgt_len_norm          : len min-max 정규화
+  - xgt_fenet_base_norm   : fenet_base min-max 정규화
+  - xgt_fenet_slot_norm   : fenet_slot min-max 정규화
+  - xgt_cmd_norm          : cmd min-max 정규화
+  - xgt_dtype_norm        : dtype min-max 정규화
+  - xgt_blkcnt_norm       : blkcnt min-max 정규화
+  - xgt_err_flag          : err_code != 0 이면 1.0 else 0.0 (정규화 X)
+  - xgt_err_code_norm     : err_code min-max 정규화
+  - xgt_datasize_norm     : datasize min-max 정규화
+  - xgt_addr_count        : translated_addr 개수
+  - xgt_addr_min          : translated_addr 최소 (없으면 -1.0)
+  - xgt_addr_max          : translated_addr 최대 (없으면 -1.0)
+  - xgt_addr_range        : translated_addr 범위 (없으면 -1.0)
+  - xgt_word_min          : word_value 최소 (없으면 -1.0)
+  - xgt_word_max          : word_value 최대 (없으면 -1.0)
+  - xgt_word_mean         : word_value 평균 (없으면 -1.0)
+  - xgt_word_std          : word_value 표준편차 (없으면 -1.0)
 """
 
-import json
+import json, sys
 import argparse
+import math
+import re
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from typing import Any, Dict, List
-import re
 
-# ---------------------------------------------
-# Feature 이름 (설명용, 코드 내부에서는 dtype이 source of truth)
-# ---------------------------------------------
-FEATURE_NAMES = [
-    "xgt_var_id",
-    "xgt_var_cnt",
-    "xgt_source",
-    "xgt_fenet_base",
-    "xgt_fenet_slot",
-    "xgt_cmd",
-    "xgt_dtype",
-    "xgt_blkcnt",
-    "xgt_err_flag",
-    "xgt_err_code",
-    "xgt_datasize",
-    # 👇 새로 추가되는 8개
-    "xgt_addr_count",
-    "xgt_addr_min",
-    "xgt_addr_max",
-    "xgt_addr_range",
-    "xgt_word_min",
-    "xgt_word_max",
-    "xgt_word_mean",
-    "xgt_word_std",
-    # 기존
-    "xgt_data_missing",
-    "xgt_data_len_chars",
-    "xgt_data_num_spaces",
-    "xgt_data_is_hex",
-    "xgt_data_n_bytes",
-    "xgt_data_zero_ratio",
-    "xgt_data_first_byte",
-    "xgt_data_last_byte",
-    "xgt_data_mean_byte",
-    "xgt_data_bucket",
-]
+from min_max_normalize import minmax_cal, minmax_norm_scalar
+from change_value_type import _to_float, _hex_to_float, _hex_to_int
+from stats_from_list import stats_count_min_max_range, stats_min_max_mean_std
 
-NORM_FIELDS = [
-    "xgt_var_cnt",
-    "xgt_source",
-    "xgt_fenet_base",
-    "xgt_fenet_slot",
-    "xgt_cmd",
-    "xgt_dtype",
-    "xgt_blkcnt",
-    "xgt_err_code",
-    "xgt_datasize",
-    "xgt_data_len_chars",
-    "xgt_data_num_spaces",
-    "xgt_data_n_bytes",
-    # 👇 translated_addr / word_value 통계도 정규화 대상 추가
-    "xgt_addr_count",
-    "xgt_addr_min",
-    "xgt_addr_max",
-    "xgt_addr_range",
-    "xgt_word_min",
-    "xgt_word_max",
-    "xgt_word_mean",
-    "xgt_word_std",
-]
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from utils.file_load import file_load
 
 
-NORM_PARAMS_FILE = "xgt_fen_norm_params.json"
-
-
-# ---------------------------------------------
-# Var ID 생성기 (vars[0] → ID)
-# ---------------------------------------------
-def get_var_id_factory(var_map: Dict[str, int]):
-    """
-    var_map: {"R17": 1, "R20": 2, ...}
-    """
-    next_id = max(var_map.values()) + 1 if var_map else 1
-
-    def get_var_id(var_name: str) -> int:
-        nonlocal next_id
-        if not var_name:
-            return 0  # UNK
-        if var_name not in var_map:
-            var_map[var_name] = next_id
-            next_id += 1
-        return var_map[var_name]
-
-    return get_var_id
-
-
-# ---------------------------------------------
-# 안전한 int 변환 (10진수 + 16진수 "0x.." 모두 지원)
-# ---------------------------------------------
-def to_int(value: Any, default: int = 0) -> int:
-    """
-    "10", 10, "0x10" 같은 값들을 모두 int로 변환.
-    - "0x.." 형태면 16진수로 인식
-    - 그 외는 10진수 시도
-    """
-    if value is None:
-        return default
-
+def _clean_var_name(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, float) and not math.isfinite(value):
+        return ""
     s = str(value).strip()
     if not s:
-        return default
+        return ""
+    if s.lower() in ("nan", "none", "null"):
+        return ""
+    return s
 
-    try:
-        # "0x10" 같이 base 자동 인식
-        return int(s, 0)
-    except ValueError:
-        try:
-            return int(s)
-        except ValueError:
-            return default
 
-# ---------------------------------------------
-# translated_addr / word_value 리스트 파싱 + 통계
-# ---------------------------------------------
-# ---------------------------------------------
-# translated_addr / word_value 리스트 파싱 + 통계
-# ---------------------------------------------
-def parse_xgt_translated_addr_list(value: Any) -> List[int]:
-    """
-    xgt_fen.translated_addr: ["M1","M2", ...] 같은 값들을 숫자 리스트로 변환.
-    - "M1" -> 1, "M2" -> 2 처럼 '숫자 부분'만 추출해서 사용
-    """
-    result: List[int] = []
-
-    def _handle_one(x: Any):
-        s = str(x).strip()
-        if not s:
-            return
-        # 문자열 안에서 숫자 부분만 추출
-        m = re.search(r"(\d+)", s)
-        if m:
-            try:
-                result.append(int(m.group(1)))
-            except ValueError:
-                pass
-
-    if value is None:
-        return result
-
-    if isinstance(value, list):
-        for v in value:
-            _handle_one(v)
-        return result
-
+def _as_list(value: Any) -> List[Any]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
     s = str(value).strip()
-    # JSON 문자열 형태인 경우 예: '["M1","M2"]'
+    if not s:
+        return []
     if s.startswith("[") and s.endswith("]"):
         try:
-            arr = json.loads(s)
-            return parse_xgt_translated_addr_list(arr)
-        except Exception:
-            _handle_one(s)
-            return result
-
-    _handle_one(s)
-    return result
-
-
-def parse_xgt_word_value_list(value: Any) -> List[float]:
-    """
-    xgt_fen.word_value: ["0","1","2"] or [0,1,2] or "0" 등을 float 리스트로 변환.
-    """
-    result: List[float] = []
-
-    def _handle_one(x: Any):
-        try:
-            v = float(to_int(x))
-            result.append(v)
+            loaded = json.loads(s)
+            if isinstance(loaded, list):
+                return loaded
         except Exception:
             pass
-
-    if value is None:
-        return result
-
-    if isinstance(value, list):
-        for v in value:
-            _handle_one(v)
-        return result
-
-    s = str(value).strip()
-    if s.startswith("[") and s.endswith("]"):
-        try:
-            arr = json.loads(s)
-            return parse_xgt_word_value_list(arr)
-        except Exception:
-            _handle_one(s)
-            return result
-
-    _handle_one(s)
-    return result
+    return [value]
 
 
-def compute_xgt_addr_stats(addrs: List[int]) -> Dict[str, float]:
-    """
-    translated_addr(숫자화된 것) 리스트에 대해 count/min/max/range 계산.
-    """
-    if not addrs:
-        return {
-            "count": 0.0,
-            "min": 0.0,
-            "max": 0.0,
-            "range": 0.0,
-        }
-    count = float(len(addrs))
-    amin = float(min(addrs))
-    amax = float(max(addrs))
-    arange = float(amax - amin)
-    return {
-        "count": count,
-        "min": amin,
-        "max": amax,
-        "range": arange,
-    }
+def _parse_first_var_and_cnt(vars_value: Any) -> (str, float):
+    if vars_value in (None, ""):
+        return ("", float("nan"))
+    if isinstance(vars_value, float) and not math.isfinite(vars_value):
+        return ("", float("nan"))
 
+    names: List[str] = []
 
-def compute_xgt_word_stats(vals: List[float]) -> Dict[str, float]:
-    """
-    word_value 리스트에 대해 min/max/mean/std 계산.
-    """
-    if not vals:
-        return {
-            "min": 0.0,
-            "max": 0.0,
-            "mean": 0.0,
-            "std": 0.0,
-        }
-    vmin = float(min(vals))
-    vmax = float(max(vals))
-    mean = float(sum(vals) / len(vals))
-    var = float(sum((v - mean) ** 2 for v in vals) / len(vals))
-    std = float(var ** 0.5)
-    return {
-        "min": vmin,
-        "max": vmax,
-        "mean": mean,
-        "std": std,
-    }
-
-
-# ---------------------------------------------
-# xgt_fen.data 요약 피처
-# ---------------------------------------------
-def extract_xgt_data_features(data: Any) -> Dict[str, float]:
-    """
-    xgt_fen.data (string 또는 string 리스트) -> 여러 개 numeric feature로 변환
-
-    예시:
-        "xgt_fen.data": [
-            "0000",
-            "000000000000000000000000",
-            "05001e00f50000001c002700",
-            "3e01"
-        ]
-
-    각 원소는 hex string 이라고 가정하고,
-    공백 제거 후 2글자씩 잘라서 바이트 배열을 만든다.
-    """
-
-    # 1) data를 문자열 리스트로 통일
-    if data is None:
-        strings: List[str] = []
-    elif isinstance(data, list):
-        strings = [str(x).strip() for x in data if str(x).strip()]
+    if isinstance(vars_value, (list, tuple)):
+        for x in vars_value:
+            s = _clean_var_name(x)
+            if s:
+                names.append(s)
     else:
-        s = str(data).strip()
-        strings = [s] if s else []
-
-    # 전체 문자열 하나로 합치기 (공백으로 join)
-    joined = " ".join(strings)
-    s = joined
-    s_no_space = s.replace(" ", "")
-
-    # 공통 문자열 피처
-    length_chars = len(s)
-    num_spaces = s.count(" ")
-
-    # hex 여부 판단
-    hex_chars = sum(ch in "0123456789abcdefABCDEF" for ch in s_no_space)
-    non_hex_chars = len(s_no_space) - hex_chars
-    is_hex = int(len(s_no_space) > 0 and non_hex_chars == 0)
-
-    # 2) hex로 해석해서 바이트 나열 만들기
-    bytes_values: List[int] = []
-    if is_hex:
-        for elem in strings:
-            hex_str = elem.replace(" ", "")
-            if len(hex_str) < 2:
-                continue
-            # 2글자씩 잘라서 바이트로
-            for i in range(0, len(hex_str) - 1, 2):
-                chunk = hex_str[i:i+2]
-                try:
-                    v = int(chunk, 16)
-                    bytes_values.append(v)
-                except ValueError:
-                    continue
-
-    n_bytes = len(bytes_values)
-    if n_bytes > 0:
-        zero_count = sum(1 for v in bytes_values if v == 0)
-        zero_ratio = zero_count / float(n_bytes)
-        first_byte = bytes_values[0]
-        last_byte = bytes_values[-1]
-        mean_byte = float(sum(bytes_values) / float(n_bytes))
-    else:
-        zero_ratio = 0.0
-        first_byte = 0
-        last_byte = 0
-        mean_byte = 0.0
-
-    # 동일 문자열 패턴용 해시 버킷 (embedding으로 쓰고 싶으면 이 값 사용)
-    bucket = hash(s) % 1024 if s else 0
-
-    return {
-        "xgt_data_len_chars": float(length_chars),
-        "xgt_data_num_spaces": float(num_spaces),
-        "xgt_data_is_hex": float(is_hex),
-        "xgt_data_n_bytes": float(n_bytes),
-        "xgt_data_zero_ratio": float(zero_ratio),
-        "xgt_data_first_byte": float(first_byte),
-        "xgt_data_last_byte": float(last_byte),
-        "xgt_data_mean_byte": float(mean_byte),
-        "xgt_data_bucket": float(bucket),
-    }
-
-
-# ---------------------------------------------
-# 한 레코드(xgt_fen) 전처리 (정규화 전 RAW feature)
-# ---------------------------------------------
-def preprocess_xgt_record(obj: Dict[str, Any], get_var_id) -> Dict[str, float]:
-    """
-    protocol == "xgt_fen" 인 레코드를 RAW feature dict로 변환
-    (정규화는 나중 단계에서 수행)
-    """
-
-    feat: Dict[str, float] = {}
-
-    # 1) vars → var_id / var_cnt
-    vars_field = obj.get("xgt_fen.vars")
-
-    var_names: List[str] = []
-    if isinstance(vars_field, list):
-        var_names = [str(v).strip() for v in vars_field if str(v).strip()]
-    elif isinstance(vars_field, str):
-        # "R17,R20" 같은 경우
-        for part in vars_field.split(","):
-            p = part.strip()
+        s = _clean_var_name(vars_value)
+        if not s:
+            return ("", float("nan"))
+        for part in s.split(","):
+            p = _clean_var_name(part)
             if p:
-                var_names.append(p)
+                names.append(p)
 
-    if var_names:
-        first_var = var_names[0]
-        var_cnt = len(var_names)
-    else:
-        first_var = ""
-        var_cnt = 0
+    if not names:
+        return ("", float("nan"))
 
-    var_id = get_var_id(first_var) if first_var else 0
-    feat["xgt_var_id"] = int(var_id)      # 저장도 int, dtype도 int32
-    feat["xgt_var_cnt"] = float(var_cnt)
-
-    # 2) 헤더/명령 필드 + errstat 처리
-    source = to_int(obj.get("xgt_fen.source"))
-    fenetpos = to_int(obj.get("xgt_fen.fenetpos"))
-    cmd = to_int(obj.get("xgt_fen.cmd"))
-    dtype = to_int(obj.get("xgt_fen.dtype") or obj.get("xgt_fen.dype"))
-    blkcnt = to_int(obj.get("xgt_fen.blkcnt"))
-    datasize = to_int(obj.get("xgt_fen.datasize"))
-
-    # errstat → 에러 코드 / 플래그
-    errstat_raw = obj.get("xgt_fen.errstat")
-    err_code = to_int(errstat_raw)
-    err_flag = 1.0 if err_code != 0 else 0.0
-
-    base = (fenetpos >> 4) & 0x0F
-    slot = fenetpos & 0x0F
-
-    feat["xgt_source"] = float(source)
-    feat["xgt_fenet_base"] = float(base)
-    feat["xgt_fenet_slot"] = float(slot)
-    feat["xgt_cmd"] = float(cmd)
-    feat["xgt_dtype"] = float(dtype)
-    feat["xgt_blkcnt"] = float(blkcnt)
-    feat["xgt_datasize"] = float(datasize)
-
-    feat["xgt_err_code"] = float(err_code)
-    feat["xgt_err_flag"] = float(err_flag)
-
-    # 3) data 요약
-    data_field = obj.get("xgt_fen.data")
-    data_feats = extract_xgt_data_features(data_field)
-    feat.update(data_feats)
-
-    # 4) 데이터 없음 플래그 추가
-    length_chars = data_feats.get("xgt_data_len_chars", 0.0)
-    xgt_data_missing = 1.0 if (datasize > 0 and length_chars == 0.0) else 0.0
-    feat["xgt_data_missing"] = float(xgt_data_missing)
-
-    # 5) translated_addr / word_value 통계 피처 추가 (M1, M2, ... 처리)
-    translated_addr_raw = obj.get("xgt_fen.translated_addr")
-    word_value_raw      = obj.get("xgt_fen.word_value")
-
-    addr_list = parse_xgt_translated_addr_list(translated_addr_raw)
-    word_list = parse_xgt_word_value_list(word_value_raw)
-
-    addr_stats = compute_xgt_addr_stats(addr_list)
-    word_stats = compute_xgt_word_stats(word_list)
-
-    feat["xgt_addr_count"] = addr_stats["count"]
-    feat["xgt_addr_min"]   = addr_stats["min"]
-    feat["xgt_addr_max"]   = addr_stats["max"]
-    feat["xgt_addr_range"] = addr_stats["range"]
-
-    feat["xgt_word_min"]   = word_stats["min"]
-    feat["xgt_word_max"]   = word_stats["max"]
-    feat["xgt_word_mean"]  = word_stats["mean"]
-    feat["xgt_word_std"]   = word_stats["std"]
-
-    return feat
+    return (names[0], float(len(names)))
 
 
-# ---------------------------------------------
-# Min-Max 정규화 함수
-# ---------------------------------------------
-def minmax_norm(val: float, vmin: float, vmax: float) -> float:
-    if vmax <= vmin:
-        return 0.0
-    return (val - vmin) / (vmax - vmin + 1e-9)
+def _get_var_id(var_map: Dict[str, int], var_name: str) -> int:
+    name = _clean_var_name(var_name)
+    if not name:
+        return 0
+
+    if name in var_map:
+        return int(var_map[name])
+
+    next_id = max(var_map.values()) + 1 if var_map else 1
+    var_map[name] = next_id
+    return int(next_id)
 
 
-# ---------------------------------------------
-# RAW feature → 정규화 feature로 변환 (공통 로직)
-# ---------------------------------------------
-def apply_norm_to_xgt_feat(raw_feat: Dict[str, float],
-                           norm_params: Dict[str, Dict[str, float]]) -> Dict[str, float]:
-    feat: Dict[str, float] = {}
-    feat["xgt_var_id"] = int(raw_feat.get("xgt_var_id", 0))
-
-    for f in NORM_FIELDS:
-        raw_v = float(raw_feat.get(f, 0.0))
-        p = norm_params.get(f, {})
-        vmin = float(p.get("min", 0.0))
-        vmax = float(p.get("max", 1.0))
-
-        if f == "xgt_cmd":
-            # ✅ sentinel 로직 추가
-            if raw_v < vmin or raw_v > vmax:
-                feat[f] = -2.0
-            elif vmax > vmin:
-                feat[f] = (raw_v - vmin) / (vmax - vmin + 1e-9)
-            else:
-                feat[f] = 0.0
-        else:
-            feat[f] = float(minmax_norm(raw_v, vmin, vmax))
-
-    # 나머지는 그대로
-    feat["xgt_err_flag"]       = float(raw_feat.get("xgt_err_flag", 0.0))
-    feat["xgt_data_missing"]   = float(raw_feat.get("xgt_data_missing", 0.0))
-    feat["xgt_data_is_hex"]    = float(raw_feat.get("xgt_data_is_hex", 0.0))
-    feat["xgt_data_zero_ratio"]= float(raw_feat.get("xgt_data_zero_ratio", 0.0))
-    feat["xgt_data_bucket"]    = float(raw_feat.get("xgt_data_bucket", 0.0))
-
-    fb = float(raw_feat.get("xgt_data_first_byte", 0.0))
-    lb = float(raw_feat.get("xgt_data_last_byte", 0.0))
-    mb = float(raw_feat.get("xgt_data_mean_byte", 0.0))
-    feat["xgt_data_first_byte"] = fb / 255.0
-    feat["xgt_data_last_byte"]  = lb / 255.0
-    feat["xgt_data_mean_byte"]  = mb / 255.0
-
-    return feat
+def _parse_translated_addr(values: Any) -> List[float]:
+    out: List[float] = []
+    for x in _as_list(values):
+        s = _clean_var_name(x)
+        if not s:
+            continue
+        m = re.search(r"(\d+)", s)
+        if not m:
+            continue
+        v = _to_float(m.group(1))
+        if v is None:
+            continue
+        out.append(float(v))
+    return out
 
 
-# ---------------------------------------------
-# 단일 패킷 + 정규화까지 처리 (실시간/운영 용)
-# ---------------------------------------------
-def preprocess_xgt_fen_with_norm(
-    obj: Dict[str, Any],
-    var_map: Dict[str, int],
-    norm_params: Dict[str, Dict[str, float]],
-) -> Dict[str, float]:
-    """
-    단일 xgt_fen 패킷 obj에 대해
-    - xgt_var_id (int)
-    - 나머지 numeric feature (정규화 포함)
-    를 모두 담은 dict 반환.
-
-    사용 예:
-        var_map = json.loads(open("xgt_var_vocab.json","r",encoding="utf-8").read())
-        norm_params = json.loads(open("xgt_fen_norm_params.json","r",encoding="utf-8").read())
-
-        feat = preprocess_xgt_fen_with_norm(obj, var_map, norm_params)
-    """
-    get_var_id = get_var_id_factory(var_map)
-    raw_feat = preprocess_xgt_record(obj, get_var_id)
-    norm_feat = apply_norm_to_xgt_feat(raw_feat, norm_params)
-    return norm_feat
+def _parse_word_value(values: Any) -> List[float]:
+    out: List[float] = []
+    for x in _as_list(values):
+        v = _hex_to_float(x)
+        if v is None:
+            continue
+        out.append(float(v))
+    return out
 
 
-# ---------------------------------------------
-# FIT
-# ---------------------------------------------
-def fit_preprocess(input_path: Path, out_dir: Path):
+def _fenet_base(value: Any) -> float:
+    if value is None:
+        return float("nan")
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return float("nan")
+        value = int(value)
+    elif not isinstance(value, int):
+        value = _hex_to_int(value)
+        if value is None:
+            return float("nan")
+    return float((int(value) >> 4) & 0x0F)
 
+
+def _fenet_slot(value: Any) -> float:
+    if value is None:
+        return float("nan")
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return float("nan")
+        value = int(value)
+    elif not isinstance(value, int):
+        value = _hex_to_int(value)
+        if value is None:
+            return float("nan")
+    return float(int(value) & 0x0F)
+
+
+def _df_get_first(df: pd.DataFrame, keys: List[str], n: int) -> pd.Series:
+    for k in keys:
+        if k in df.columns:
+            return df[k]
+    return pd.Series([None] * n, index=df.index)
+
+
+# fit
+def fit_preprocess_xgt(input_path: Path, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
+    df = pd.read_json(input_path, lines=True, encoding="utf-8-sig")
 
+    norm_cols = [
+        "xgt.var_cnt",
+        "xgt.source",
+        "xgt.len",
+        "xgt.fenet_base",
+        "xgt.fenet_slot",
+        "xgt.cmd",
+        "xgt.dtype",
+        "xgt.blkcnt",
+        "xgt.err_code",
+        "xgt.datasize",
+    ]
+
+    if df.empty:
+        norm_params = {f"{c}_min": -1.0 for c in norm_cols} | {f"{c}_max": -1.0 for c in norm_cols}
+        (out_dir / "xgt_norm_params.json").write_text(json.dumps(norm_params, indent=2, ensure_ascii=False), encoding="utf-8-sig")
+        (out_dir / "xgt_var_vocab.json").write_text(json.dumps({}, indent=2, ensure_ascii=False), encoding="utf-8-sig")
+
+        dtype = np.dtype([
+            ("xgt_var_id", "i4"),
+            ("xgt_var_cnt_norm", "f4"),
+            ("xgt_source_norm", "f4"),
+            ("xgt_len_norm", "f4"),
+            ("xgt_fenet_base_norm", "f4"),
+            ("xgt_fenet_slot_norm", "f4"),
+            ("xgt_cmd_norm", "f4"),
+            ("xgt_dtype_norm", "f4"),
+            ("xgt_blkcnt_norm", "f4"),
+            ("xgt_err_flag", "f4"),
+            ("xgt_err_code_norm", "f4"),
+            ("xgt_datasize_norm", "f4"),
+            ("xgt_addr_count", "f4"),
+            ("xgt_addr_min", "f4"),
+            ("xgt_addr_max", "f4"),
+            ("xgt_addr_range", "f4"),
+            ("xgt_word_min", "f4"),
+            ("xgt_word_max", "f4"),
+            ("xgt_word_mean", "f4"),
+            ("xgt_word_std", "f4"),
+        ])
+        data = np.zeros(0, dtype=dtype)
+        np.save(out_dir / "xgt.npy", data)
+        return
+
+    n = len(df)
+
+    # ---------- 0) var_vocab + xgt.var_cnt 생성 ----------
     var_map: Dict[str, int] = {}
-    get_var_id = get_var_id_factory(var_map)
+    vars_series = _df_get_first(df, ["xgt_fen.regs.vars", "xgt_fen.vars", "xgt.vars"], n)
 
-    rows_raw: List[Dict[str, float]] = []
+    var_ids: List[int] = []
+    var_cnts: List[float] = []
 
-    with input_path.open("r", encoding="utf-8") as fin:
-        for line in fin:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
+    for v in vars_series.tolist():
+        first_var, var_cnt = _parse_first_var_and_cnt(v)
+        var_ids.append(_get_var_id(var_map, first_var))
+        var_cnts.append(var_cnt)
 
-            if obj.get("protocol") != "xgt_fen":
-                continue
+    var_map = {k: v for k, v in var_map.items() if _clean_var_name(k)}
+    (out_dir / "xgt_var_vocab.json").write_text(json.dumps(var_map, indent=2, ensure_ascii=False), encoding="utf-8-sig")
 
-            feat = preprocess_xgt_record(obj, get_var_id)
-            rows_raw.append(feat)
+    df["xgt_var_id"] = np.array(var_ids, dtype=np.int32)
+    df["xgt.var_cnt"] = pd.to_numeric(pd.Series(var_cnts, index=df.index), errors="coerce").astype("float32")
 
-    # vocab 저장
-    (out_dir / "xgt_var_vocab.json").write_text(
-        json.dumps(var_map, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    print("✅ FIT 완료")
-    print(f"- xgt_var_vocab.json 저장: {out_dir/'xgt_var_vocab.json'}")
+    # ---------- 1) scalar RAW 컬럼 생성 ----------
+    df["xgt.source"] = pd.to_numeric(_df_get_first(df, ["xgt.source", "xgt_fen.source", "xgt_fen.regs.source"], n).apply(_hex_to_float), errors="coerce").astype("float32")
+    df["xgt.len"] = pd.to_numeric(_df_get_first(df, ["xgt.len", "xgt_fen.regs.len", "xgt_fen.len"], n).apply(_hex_to_float), errors="coerce").astype("float32")
+    df["xgt.cmd"] = pd.to_numeric(_df_get_first(df, ["xgt.cmd", "xgt_fen.regs.cmd", "xgt_fen.cmd"], n).apply(_hex_to_float), errors="coerce").astype("float32")
+    df["xgt.dtype"] = pd.to_numeric(_df_get_first(df, ["xgt.dtype", "xgt_fen.regs.dtype", "xgt_fen.dtype", "xgt_fen.regs.dype", "xgt_fen.dype"], n).apply(_hex_to_float), errors="coerce").astype("float32")
+    df["xgt.blkcnt"] = pd.to_numeric(_df_get_first(df, ["xgt.blkcnt", "xgt_fen.regs.blkcnt", "xgt_fen.blkcnt"], n).apply(_hex_to_float), errors="coerce").astype("float32")
+    df["xgt.err_code"] = pd.to_numeric(_df_get_first(df, ["xgt.errstat", "xgt_fen.regs.errstat", "xgt_fen.errstat"], n).apply(_hex_to_float), errors="coerce").astype("float32")
+    df["xgt.datasize"] = pd.to_numeric(_df_get_first(df, ["xgt.datasize", "xgt_fen.regs.datasize", "xgt_fen.datasize"], n).apply(_hex_to_float), errors="coerce").astype("float32")
 
-    # -----------------------------
-    # 1) 정규화 파라미터 계산 (Min/Max)
-    # -----------------------------
-    norm_params: Dict[str, Dict[str, float]] = {
-        f: {"min": None, "max": None} for f in NORM_FIELDS
-    }
+    # ---------- 1-1) fenetpos -> base/slot (여기서 float로 바뀌는 문제 방지) ----------
+    fenetpos_src = _df_get_first(df, ["xgt.fenetpos", "xgt_fen.regs.fenetpos", "xgt_fen.fenetpos"], n).tolist()
+    fenetpos_list = [_hex_to_int(v) for v in fenetpos_src]
+    fenetpos_series = pd.Series(fenetpos_list, index=df.index, dtype="object")
 
-    for feat in rows_raw:
-        for f in NORM_FIELDS:
-            v = float(feat.get(f, 0.0))
-            if norm_params[f]["min"] is None or v < norm_params[f]["min"]:
-                norm_params[f]["min"] = v
-            if norm_params[f]["max"] is None or v > norm_params[f]["max"]:
-                norm_params[f]["max"] = v
+    df["xgt.fenet_base"] = fenetpos_series.apply(_fenet_base).astype("float32")
+    df["xgt.fenet_slot"] = fenetpos_series.apply(_fenet_slot).astype("float32")
 
-    # 빈 경우 방어코드
-    for f in NORM_FIELDS:
-        if norm_params[f]["min"] is None:
-            norm_params[f]["min"] = 0.0
-            norm_params[f]["max"] = 1.0
+    df["xgt_err_flag"] = df["xgt.err_code"].apply(
+        lambda v: 1.0 if (v is not None and math.isfinite(float(v)) and float(v) != 0.0) else 0.0
+    ).astype("float32")
 
-    # JSON 저장
-    (out_dir / NORM_PARAMS_FILE).write_text(
-        json.dumps(norm_params, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    print(f"- {NORM_PARAMS_FILE} 저장: {out_dir / NORM_PARAMS_FILE}")
+    # ---------- 2) min-max 파라미터 산출 ----------
+    norm_params = minmax_norm_scalar(df, norm_cols)
+    print(norm_params)
 
-    # -----------------------------
-    # 2) numpy 구조화 배열 생성 (정규화 적용)
-    # -----------------------------    
-    dtype = np.dtype([
-        ("xgt_var_id", "i4"),   # Embedding용 ID (int32)
-        ("xgt_var_cnt", "f4"),
-        ("xgt_source", "f4"),
-        ("xgt_fenet_base", "f4"),
-        ("xgt_fenet_slot", "f4"),
-        ("xgt_cmd", "f4"),
-        ("xgt_dtype", "f4"),
-        ("xgt_blkcnt", "f4"),
-        ("xgt_err_flag", "f4"),
-        ("xgt_err_code", "f4"),
-        ("xgt_datasize", "f4"),
-        # 👇 여기 추가
-        ("xgt_addr_count", "f4"),
-        ("xgt_addr_min", "f4"),
-        ("xgt_addr_max", "f4"),
-        ("xgt_addr_range", "f4"),
-        ("xgt_word_min", "f4"),
-        ("xgt_word_max", "f4"),
-        ("xgt_word_mean", "f4"),
-        ("xgt_word_std", "f4"),
-        # 기존
-        ("xgt_data_missing", "f4"),
-        ("xgt_data_len_chars", "f4"),
-        ("xgt_data_num_spaces", "f4"),
-        ("xgt_data_is_hex", "f4"),
-        ("xgt_data_n_bytes", "f4"),
-        ("xgt_data_zero_ratio", "f4"),
-        ("xgt_data_first_byte", "f4"),
-        ("xgt_data_last_byte", "f4"),
-        ("xgt_data_mean_byte", "f4"),
-        ("xgt_data_bucket", "f4"),
-    ])
+    # ---------- 3) min-max 정규화 적용 ----------
+    vminmax = np.vectorize(minmax_cal, otypes=[np.float32])
+    for col in norm_cols:
+        series = pd.to_numeric(
+            df.get(col, pd.Series([np.nan] * n, index=df.index)),
+            errors="coerce"
+        ).astype("float32")
 
+        arr = series.to_numpy(copy=False)
+        out = np.full(arr.shape, -1.0, dtype=np.float32)
 
+        mask = ~np.isnan(arr)
+        vmin = float(norm_params.get(f"{col}_min", 0.0))
+        vmax = float(norm_params.get(f"{col}_max", 0.0))
 
-    data = np.zeros(len(rows_raw), dtype=dtype)
+        out[mask] = vminmax(arr[mask], vmin, vmax)
+        safe_col = col.replace(".", "_")
+        df[f"{safe_col}_norm"] = out
 
-    for idx, raw_feat in enumerate(rows_raw):
-        norm_feat = apply_norm_to_xgt_feat(raw_feat, norm_params)
-        for name in data.dtype.names:
-            data[name][idx] = norm_feat.get(name, 0.0)
+    # ---------- 4) vocab + norm_params 저장 ----------
+    (out_dir / "xgt_norm_params.json").write_text(json.dumps(norm_params, indent=2, ensure_ascii=False), encoding="utf-8-sig")
 
-    np.save(out_dir / "xgt_fen.npy", data)
+    # ---------- 5) list stats 추출 ----------
+    translated_series = _df_get_first(df, ["xgt_fen.regs.translated_addr", "xgt_fen.translated_addr", "xgt.translated_addr"], n)
+    word_series = _df_get_first(df, ["xgt_fen.regs.word_value", "xgt_fen.word_value", "xgt.word_value"], n)
 
-    print(f"- xgt_fen.npy 저장: {out_dir/'xgt_fen.npy'}")
-    print(f"- shape: {data.shape}")
+    addr_stats = translated_series.apply(lambda v: stats_count_min_max_range(_parse_translated_addr(v)))
+    df["xgt_addr_count"] = addr_stats.map(lambda r: float(r.get("count", 0.0) or 0.0)).astype("float32")
+    df["xgt_addr_min"] = addr_stats.map(lambda r: float(r["min"]) if r.get("min") is not None else -1.0).astype("float32")
+    df["xgt_addr_max"] = addr_stats.map(lambda r: float(r["max"]) if r.get("max") is not None else -1.0).astype("float32")
+    df["xgt_addr_range"] = addr_stats.map(lambda r: float(r["range"]) if r.get("range") is not None else -1.0).astype("float32")
 
-    # 앞 5개 샘플 출력
-    print("\n===== 앞 5개 xgt_fen 전처리 샘플 (정규화 적용 후) =====")
-    for i in range(min(5, len(data))):
-        sample = {name: data[name][i] for name in data.dtype.names}
-        print(sample)
+    word_stats = word_series.apply(lambda v: stats_min_max_mean_std(_parse_word_value(v), ddof=0))
+    df["xgt_word_min"] = word_stats.map(lambda r: float(r["min"]) if r.get("min") is not None else -1.0).astype("float32")
+    df["xgt_word_max"] = word_stats.map(lambda r: float(r["max"]) if r.get("max") is not None else -1.0).astype("float32")
+    df["xgt_word_mean"] = word_stats.map(lambda r: float(r["mean"]) if r.get("mean") is not None else -1.0).astype("float32")
+    df["xgt_word_std"] = word_stats.map(lambda r: float(r["std"]) if r.get("std") is not None else -1.0).astype("float32")
 
-
-# ---------------------------------------------
-# TRANSFORM
-# ---------------------------------------------
-def transform_preprocess(input_path: Path, out_dir: Path):
-
-    vocab_path = out_dir / "xgt_var_vocab.json"
-    if not vocab_path.exists():
-        raise FileNotFoundError(f"❌ {vocab_path} 가 없습니다. 먼저 --fit 을 실행하세요.")
-
-    norm_path = out_dir / NORM_PARAMS_FILE
-    if not norm_path.exists():
-        raise FileNotFoundError(f"❌ {norm_path} 가 없습니다. 먼저 --fit 을 실행하세요.")
-
-    var_map = json.loads(vocab_path.read_text(encoding="utf-8"))
-    norm_params = json.loads(norm_path.read_text(encoding="utf-8"))
-
-    get_var_id = get_var_id_factory(var_map)
-
-    rows_norm: List[Dict[str, float]] = []
-
-    with input_path.open("r", encoding="utf-8") as fin:
-        for line in fin:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-
-            if obj.get("protocol") != "xgt_fen":
-                continue
-
-            raw_feat = preprocess_xgt_record(obj, get_var_id)
-            norm_feat = apply_norm_to_xgt_feat(raw_feat, norm_params)
-            rows_norm.append(norm_feat)
-
+    # ---------- 6) xgt.npy 저장 ----------
     dtype = np.dtype([
         ("xgt_var_id", "i4"),
-        ("xgt_var_cnt", "f4"),
-        ("xgt_source", "f4"),
-        ("xgt_fenet_base", "f4"),
-        ("xgt_fenet_slot", "f4"),
-        ("xgt_cmd", "f4"),
-        ("xgt_dtype", "f4"),
-        ("xgt_blkcnt", "f4"),
+        ("xgt_var_cnt_norm", "f4"),
+        ("xgt_source_norm", "f4"),
+        ("xgt_len_norm", "f4"),
+        ("xgt_fenet_base_norm", "f4"),
+        ("xgt_fenet_slot_norm", "f4"),
+        ("xgt_cmd_norm", "f4"),
+        ("xgt_dtype_norm", "f4"),
+        ("xgt_blkcnt_norm", "f4"),
         ("xgt_err_flag", "f4"),
-        ("xgt_err_code", "f4"),
-        ("xgt_datasize", "f4"),
+        ("xgt_err_code_norm", "f4"),
+        ("xgt_datasize_norm", "f4"),
         ("xgt_addr_count", "f4"),
         ("xgt_addr_min", "f4"),
         ("xgt_addr_max", "f4"),
@@ -738,29 +348,171 @@ def transform_preprocess(input_path: Path, out_dir: Path):
         ("xgt_word_max", "f4"),
         ("xgt_word_mean", "f4"),
         ("xgt_word_std", "f4"),
-        ("xgt_data_missing", "f4"),
-        ("xgt_data_len_chars", "f4"),
-        ("xgt_data_num_spaces", "f4"),
-        ("xgt_data_is_hex", "f4"),
-        ("xgt_data_n_bytes", "f4"),
-        ("xgt_data_zero_ratio", "f4"),
-        ("xgt_data_first_byte", "f4"),
-        ("xgt_data_last_byte", "f4"),
-        ("xgt_data_mean_byte", "f4"),
-        ("xgt_data_bucket", "f4"),
     ])
 
+    data = np.zeros(len(df), dtype=dtype)
 
-    data = np.zeros(len(rows_norm), dtype=dtype)
+    data["xgt_var_id"]            = df["xgt_var_id"].to_numpy(dtype=np.int32, copy=False)
 
-    for idx, feat in enumerate(rows_norm):
-        for name in data.dtype.names:
-            data[name][idx] = feat.get(name, 0.0)
+    data["xgt_var_cnt_norm"]      = df["xgt_var_cnt_norm"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_source_norm"]       = df["xgt_source_norm"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_len_norm"]          = df["xgt_len_norm"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_fenet_base_norm"]   = df["xgt_fenet_base_norm"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_fenet_slot_norm"]   = df["xgt_fenet_slot_norm"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_cmd_norm"]          = df["xgt_cmd_norm"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_dtype_norm"]        = df["xgt_dtype_norm"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_blkcnt_norm"]       = df["xgt_blkcnt_norm"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_err_flag"]          = df["xgt_err_flag"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_err_code_norm"]     = df["xgt_err_code_norm"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_datasize_norm"]     = df["xgt_datasize_norm"].to_numpy(dtype=np.float32, copy=False)
 
-    np.save(out_dir / "xgt_fen.npy", data)
+    data["xgt_addr_count"]        = df["xgt_addr_count"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_addr_min"]          = df["xgt_addr_min"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_addr_max"]          = df["xgt_addr_max"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_addr_range"]        = df["xgt_addr_range"].to_numpy(dtype=np.float32, copy=False)
 
-    print("✅ TRANSFORM 완료")
-    print(f"- xgt_fen.npy 저장: {out_dir/'xgt_fen.npy'} shape={data.shape}")
+    data["xgt_word_min"]          = df["xgt_word_min"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_word_max"]          = df["xgt_word_max"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_word_mean"]         = df["xgt_word_mean"].to_numpy(dtype=np.float32, copy=False)
+    data["xgt_word_std"]          = df["xgt_word_std"].to_numpy(dtype=np.float32, copy=False)
+
+    np.save(out_dir / "xgt.npy", data)
+
+    print("\n===== 앞 5개 전처리 샘플 =====")
+    for i in range(min(5, len(data))):
+        print({
+            "xgt_var_id"          : int(data["xgt_var_id"][i]),
+            "xgt_var_cnt_norm"    : float(data["xgt_var_cnt_norm"][i]),
+            "xgt_source_norm"     : float(data["xgt_source_norm"][i]),
+            "xgt_len_norm"        : float(data["xgt_len_norm"][i]),
+            "xgt_fenet_base_norm" : float(data["xgt_fenet_base_norm"][i]),
+            "xgt_fenet_slot_norm" : float(data["xgt_fenet_slot_norm"][i]),
+            "xgt_cmd_norm"        : float(data["xgt_cmd_norm"][i]),
+            "xgt_dtype_norm"      : float(data["xgt_dtype_norm"][i]),
+            "xgt_blkcnt_norm"     : float(data["xgt_blkcnt_norm"][i]),
+            "xgt_err_flag"        : float(data["xgt_err_flag"][i]),
+            "xgt_err_code_norm"   : float(data["xgt_err_code_norm"][i]),
+            "xgt_datasize_norm"   : float(data["xgt_datasize_norm"][i]),
+            "xgt_addr_count"      : float(data["xgt_addr_count"][i]),
+            "xgt_addr_min"        : float(data["xgt_addr_min"][i]),
+            "xgt_addr_max"        : float(data["xgt_addr_max"][i]),
+            "xgt_addr_range"      : float(data["xgt_addr_range"][i]),
+            "xgt_word_min"        : float(data["xgt_word_min"][i]),
+            "xgt_word_max"        : float(data["xgt_word_max"][i]),
+            "xgt_word_mean"       : float(data["xgt_word_mean"][i]),
+            "xgt_word_std"        : float(data["xgt_word_std"][i]),
+        })
+
+
+# 단일 패킷 전처리 함수 (운영 단계에서 사용)
+def preprocess_xgt(records: Dict[str, Any], norm_params: Dict[str, Any], var_map: Dict[str, int]) -> Dict[str, Any]:
+    vars_value = records.get("xgt_fen.regs.vars")
+    if vars_value in (None, ""):
+        vars_value = records.get("xgt_fen.vars")
+    if vars_value in (None, ""):
+        vars_value = records.get("xgt.vars")
+
+    first_var, var_cnt_float = _parse_first_var_and_cnt(vars_value)
+
+    if var_cnt_float is None or (isinstance(var_cnt_float, float) and not math.isfinite(var_cnt_float)):
+        var_cnt_float = -1.0
+
+    xgt_var_id = int(var_map.get(first_var, 0)) if first_var else 0
+
+    source = records.get("xgt_fen.source")
+    length = records.get("xgt_fen.len")
+    fenetpos = records.get("xgt_fen.fenetpos")
+    cmd = records.get("xgt_fen.cmd")
+    dtype = records.get("xgt_fen.dtype")
+    blkcnt = records.get("xgt_fen.blkcnt")
+    errstat = records.get("xgt_fen.errstat")
+    datasize = records.get("xgt_fen.datasize")
+
+    source_float = _hex_to_float(source)
+    len_float = _hex_to_float(length)
+    cmd_float = _hex_to_float(cmd)
+    dtype_float = _hex_to_float(dtype)
+    blkcnt_float = _hex_to_float(blkcnt)
+    err_code_float = _hex_to_float(errstat)
+    datasize_float = _hex_to_float(datasize)
+
+    fenetpos_int = _hex_to_int(fenetpos)
+    base_float = _fenet_base(fenetpos_int)
+    slot_float = _fenet_slot(fenetpos_int)
+
+    err_flag = 0.0
+    if err_code_float is not None and math.isfinite(float(err_code_float)) and float(err_code_float) != 0.0:
+        err_flag = 1.0
+
+    var_cnt_min, var_cnt_max = _to_float(norm_params.get("xgt.var_cnt_min")), _to_float(norm_params.get("xgt.var_cnt_max"))
+    source_min, source_max   = _to_float(norm_params.get("xgt.source_min")), _to_float(norm_params.get("xgt.source_max"))
+    len_min, len_max         = _to_float(norm_params.get("xgt.len_min")), _to_float(norm_params.get("xgt.len_max"))
+    base_min, base_max       = _to_float(norm_params.get("xgt.fenet_base_min")), _to_float(norm_params.get("xgt.fenet_base_max"))
+    slot_min, slot_max       = _to_float(norm_params.get("xgt.fenet_slot_min")), _to_float(norm_params.get("xgt.fenet_slot_max"))
+    cmd_min, cmd_max         = _to_float(norm_params.get("xgt.cmd_min")), _to_float(norm_params.get("xgt.cmd_max"))
+    dtype_min, dtype_max     = _to_float(norm_params.get("xgt.dtype_min")), _to_float(norm_params.get("xgt.dtype_max"))
+    blkcnt_min, blkcnt_max   = _to_float(norm_params.get("xgt.blkcnt_min")), _to_float(norm_params.get("xgt.blkcnt_max"))
+    err_min, err_max         = _to_float(norm_params.get("xgt.err_code_min")), _to_float(norm_params.get("xgt.err_code_max"))
+    datasize_min, datasize_max = _to_float(norm_params.get("xgt.datasize_min")), _to_float(norm_params.get("xgt.datasize_max"))
+
+    translated_addr = records.get("xgt_fen.regs.translated_addr")
+    if translated_addr in (None, ""):
+        translated_addr = records.get("xgt_fen.translated_addr")
+
+    word_value = records.get("xgt_fen.regs.word_value")
+    if word_value in (None, ""):
+        word_value = records.get("xgt_fen.word_value")
+
+    addr_list = _parse_translated_addr(translated_addr)
+    word_list = _parse_word_value(word_value)
+
+    addr_stats = stats_count_min_max_range(addr_list)
+    word_stats = stats_min_max_mean_std(word_list, ddof=0)
+
+    def _safe_norm(v: Any, vmin: Any, vmax: Any) -> float:
+        out = minmax_cal(v, vmin, vmax)
+        if out is None:
+            return -1.0
+        try:
+            f = float(out)
+            return f if math.isfinite(f) else -1.0
+        except Exception:
+            return -1.0
+
+    return {
+        "xgt_var_id"            : int(xgt_var_id),
+        "xgt_var_cnt_norm"      : float(_safe_norm(var_cnt_float, var_cnt_min, var_cnt_max)),
+        "xgt_source_norm"       : float(_safe_norm(source_float, source_min, source_max)),
+        "xgt_len_norm"          : float(_safe_norm(len_float, len_min, len_max)),
+        "xgt_fenet_base_norm"   : float(_safe_norm(base_float, base_min, base_max)),
+        "xgt_fenet_slot_norm"   : float(_safe_norm(slot_float, slot_min, slot_max)),
+        "xgt_cmd_norm"          : float(_safe_norm(cmd_float, cmd_min, cmd_max)),
+        "xgt_dtype_norm"        : float(_safe_norm(dtype_float, dtype_min, dtype_max)),
+        "xgt_blkcnt_norm"       : float(_safe_norm(blkcnt_float, blkcnt_min, blkcnt_max)),
+        "xgt_err_flag"          : float(err_flag),
+        "xgt_err_code_norm"     : float(_safe_norm(err_code_float, err_min, err_max)),
+        "xgt_datasize_norm"     : float(_safe_norm(datasize_float, datasize_min, datasize_max)),
+        "xgt_addr_count"        : float(addr_stats.get("count", 0.0) or 0.0),
+        "xgt_addr_min"          : float(addr_stats["min"]) if addr_stats.get("min") is not None else -1.0,
+        "xgt_addr_max"          : float(addr_stats["max"]) if addr_stats.get("max") is not None else -1.0,
+        "xgt_addr_range"        : float(addr_stats["range"]) if addr_stats.get("range") is not None else -1.0,
+        "xgt_word_min"          : float(word_stats["min"]) if word_stats.get("min") is not None else -1.0,
+        "xgt_word_max"          : float(word_stats["max"]) if word_stats.get("max") is not None else -1.0,
+        "xgt_word_mean"         : float(word_stats["mean"]) if word_stats.get("mean") is not None else -1.0,
+        "xgt_word_std"          : float(word_stats["std"]) if word_stats.get("std") is not None else -1.0,
+    }
+
+
+def transform_preprocess_xgt(packet: Dict[str, Any], param_dir: Path) -> Dict[str, Any]:
+    norm_path = param_dir / "xgt_norm_params.json"
+    vocab_path = param_dir / "xgt_var_vocab.json"
+
+    norm_params = file_load("json", str(norm_path)) or {}
+    var_map = file_load("json", str(vocab_path)) or {}
+
+    var_map = {k: v for k, v in var_map.items() if _clean_var_name(k)}
+
+    return preprocess_xgt(packet, norm_params, var_map)
 
 
 # ---------------------------------------------
@@ -777,82 +529,14 @@ if __name__ == "__main__":
     input_path = Path(args.input)
     out_dir = Path(args.output)
 
-    if args.fit and args.transform:
-        raise ValueError("❌ --fit 과 --transform 는 동시에 사용할 수 없습니다.")
-    if not args.fit and not args.transform:
-        raise ValueError("❌ 반드시 --fit 또는 --transform 중 하나를 선택하세요.")
-
     if args.fit:
-        fit_preprocess(input_path, out_dir)
+        fit_preprocess_xgt(input_path, out_dir)
+    elif args.transform:
+        packets = file_load("jsonl", str(input_path)) or []
+        for pkt in packets:
+            if not isinstance(pkt, dict):
+                continue
+            feat = transform_preprocess_xgt(pkt, out_dir)
+            print(feat)
     else:
-        transform_preprocess(input_path, out_dir)
-
-
-"""
-최종 데이터 사용 (xgt_fen.npy)
-
-    import numpy as np
-
-    data = np.load("output_xgt_fen/xgt_fen.npy")
-
-    # 1) vars embedding 용 ID (이미 int32)
-    xgt_var_id = data["xgt_var_id"].astype("int32")
-
-    # 2) numeric feature (이미 이 스크립트에서 정규화 완료된 값들)
-    xgt_numeric = np.stack([
-        data["xgt_var_cnt"],        # 0~1
-        data["xgt_source"],         # 0~1
-        data["xgt_fenet_base"],     # 0~1
-        data["xgt_fenet_slot"],     # 0~1
-        data["xgt_cmd"],            # 0~1
-        data["xgt_dtype"],          # 0~1
-        data["xgt_blkcnt"],         # 0~1
-        data["xgt_err_flag"],       # 0 or 1
-        data["xgt_err_code"],       # 0~1
-        data["xgt_datasize"],       # 0~1
-        data["xgt_data_missing"],   # 0 or 1
-        data["xgt_data_len_chars"], # 0~1
-        data["xgt_data_num_spaces"],# 0~1
-        data["xgt_data_is_hex"],    # 0 or 1
-        data["xgt_data_n_bytes"],   # 0~1
-        data["xgt_data_zero_ratio"],# 0~1
-        data["xgt_data_first_byte"],# 0~1 (0~255 → /255)
-        data["xgt_data_last_byte"], # 0~1
-        data["xgt_data_mean_byte"], # 0~1
-        data["xgt_data_bucket"],    # hash bucket (정규화 X, 필요하면 별도 embedding 사용)
-    ], axis=1).astype("float32")
-
-
-실시간 단일 패킷 예시:
-
-    import json
-    from pathlib import Path
-    from preprocess_xgt_fen_embed import preprocess_xgt_fen_with_norm
-
-    out_dir = Path("../result/output_xgt_fen")
-    var_map = json.loads((out_dir / "xgt_var_vocab.json").read_text(encoding="utf-8"))
-    norm_params = json.loads((out_dir / "xgt_fen_norm_params.json").read_text(encoding="utf-8"))
-
-    pkt = {
-        "protocol": "xgt_fen",
-        "xgt_fen.source": "0x33",
-        "xgt_fen.fenetpos": "0x00",
-        "xgt_fen.cmd": "0x0054",
-        "xgt_fen.dtype": "0x0014",
-        "xgt_fen.blkcnt": "1",
-        "xgt_fen.errstat": "0x0000",
-        "xgt_fen.vars": "%DB001046",
-        "xgt_fen.datasize": "12",
-        "xgt_fen.data": "05001e00f50000001c002700",
-    }
-
-    feat = preprocess_xgt_fen_with_norm(pkt, var_map, norm_params)
-    # feat dict를 그대로 모델 입력용 벡터로 변환해서 사용 가능
-
-usage:
-    # 학습 데이터 기준 vocab + feature 생성
-    python preprocess_xgt_fen_embed.py --fit -i "../data/ML_DL 학습.jsonl" -o "../result/output_xgt_fen"
-
-    # 새 데이터(테스트/운영) 전처리
-    python preprocess_xgt_fen_embed.py --transform -i "../data/ML_DL 학습.jsonl" -o "../result/output_xgt_fen"
-"""
+        raise ValueError("❌ 반드시 --fit 또는 --transform 중 하나를 선택하세요.")
