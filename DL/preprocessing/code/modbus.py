@@ -220,22 +220,32 @@ def preprocess_modbus(records: Dict[str, Any], norm_params: Dict[str, Any]) -> D
         regs_val = [regs_val]
 
     regs_addr_stats = stats_count_min_max_range(regs_addr)
-    regs_val_stats  = stats_min_max_mean_std(regs_val)   
-        
+    regs_val_stats  = stats_min_max_mean_std(regs_val)
+
+    regs_count = float(regs_addr_stats.get("count")) if regs_addr_stats.get("count") is not None else 0.0
+    regs_addr_min = float(regs_addr_stats.get("min")) if regs_addr_stats.get("min") is not None else -1.0
+    regs_addr_max = float(regs_addr_stats.get("max")) if regs_addr_stats.get("max") is not None else -1.0
+    regs_addr_range = float(regs_addr_stats.get("range")) if regs_addr_stats.get("range") is not None else -1.0
+
+    regs_val_min = float(regs_val_stats.get("min")) if regs_val_stats.get("min") is not None else -1.0
+    regs_val_max = float(regs_val_stats.get("max")) if regs_val_stats.get("max") is not None else -1.0
+    regs_val_mean = float(regs_val_stats.get("mean")) if regs_val_stats.get("mean") is not None else -1.0
+    regs_val_std = float(regs_val_stats.get("std")) if regs_val_stats.get("std") is not None else -1.0
+
     return {
-        "modbus_tid_norm"        : float(minmax_cal(tid_float, tid_min, tid_max)),   
-        "modbus_fc_norm"         : float(minmax_cal(fc_float, fc_min, fc_max)),   
-        "modbus_addr_norm"       : float(minmax_cal(addr_float, addr_min, addr_max)),   
-        "modbus_qty_norm"        : float(minmax_cal(qty_float, qty_min, qty_max)),   
-        "modbus_bc_norm"         : float(minmax_cal(bc_float, bc_min, bc_max)),   
-        "modbus_regs_count"      : regs_addr_stats["count"],
-        "modbus_regs_addr_min"   : regs_addr_stats["min"],
-        "modbus_regs_addr_max"   : regs_addr_stats["max"],
-        "modbus_regs_addr_range" : regs_addr_stats["range"],
-        "modbus_regs_val_min"    : regs_val_stats["min"],
-        "modbus_regs_val_max"    : regs_val_stats["max"],
-        "modbus_regs_val_mean"   : regs_val_stats["mean"],
-        "modbus_regs_val_std"    : regs_val_stats["std"],
+        "modbus_tid_norm"        : float(minmax_cal(tid_float, tid_min, tid_max)),
+        "modbus_fc_norm"         : float(minmax_cal(fc_float, fc_min, fc_max)),
+        "modbus_addr_norm"       : float(minmax_cal(addr_float, addr_min, addr_max)),
+        "modbus_qty_norm"        : float(minmax_cal(qty_float, qty_min, qty_max)),
+        "modbus_bc_norm"         : float(minmax_cal(bc_float, bc_min, bc_max)),
+        "modbus_regs_count"      : regs_count,
+        "modbus_regs_addr_min"   : regs_addr_min,
+        "modbus_regs_addr_max"   : regs_addr_max,
+        "modbus_regs_addr_range" : regs_addr_range,
+        "modbus_regs_val_min"    : regs_val_min,
+        "modbus_regs_val_max"    : regs_val_max,
+        "modbus_regs_val_mean"   : regs_val_mean,
+        "modbus_regs_val_std"    : regs_val_std,
     }
 
 def transform_preprocess_modbus(packet: Dict[str, Any], param_dir: Path) -> Dict[str, Any]:
