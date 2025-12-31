@@ -13,9 +13,9 @@ modbus.py
   - modbus.addr            : modbus 시작 주소
   - modbus.qty             : modbus 읽어올 레지스터 개수
   - modbus.bc              : modbus byte count
-  - modbus.regs.addr       : modbus 주소
-  - modbus.regs.val        : modbus 주소값
-#   - modbus.translated_addr : modbus 주소값
+  - modbus.regs.addr       : modbus 레지스터 번호
+  - modbus.regs.val        : modbus 레지스터 값
+#   - modbus.translated_addr : modbus 레지스터 이름 
 
 출력 feature (modbus.npy, structured numpy):
   - modbus_tid_norm        : modbus.tid min-max 정규화
