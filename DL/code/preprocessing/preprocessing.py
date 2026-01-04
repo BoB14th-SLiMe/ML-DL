@@ -53,12 +53,12 @@ def main() -> None:
     pattern_jsonl = rpath(here, paths["pattern_jsonl"])
     feature_out_jsonl = rpath(here, paths["feature_out_jsonl"])
 
-    # cmd1 = [
-    #     sys.executable,
-    #     str((here / script1).resolve()),
-    #     "-i", raw_jsonl,
-    #     "-o", preprocess_out_dir,
-    # ]
+    cmd1 = [
+        sys.executable,
+        str((here / script1).resolve()),
+        "-i", raw_jsonl,
+        "-o", preprocess_out_dir,
+    ]
 
     cmd2 = [
         sys.executable,
@@ -68,7 +68,7 @@ def main() -> None:
         "-o", feature_out_jsonl,
     ]
 
-    # run_cmd(cmd1, cwd=here)
+    run_cmd(cmd1, cwd=here)
     run_cmd(cmd2, cwd=here)
 
     print("\n[DONE] preprocess + extract_feature completed successfully.")
