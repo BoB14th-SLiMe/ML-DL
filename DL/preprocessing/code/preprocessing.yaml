@@ -1,0 +1,9 @@
+paths:
+  raw_jsonl: "../../data/RAW.jsonl"
+  preprocess_out_dir: "../../results/preprocessing"
+  pattern_jsonl: "../../results/preprocessing/pattern.jsonl"
+  feature_out_jsonl: "../../results/train/preprocess_pattern.jsonl"
+
+scripts:
+  run_all_preprocess: "1.run_all_preprocess.py"
+  extract_feature: "2.extract_feature.py"

@@ -13,7 +13,7 @@ dns.py
   - dns.qc  : dns question section에 들어있는 질문 개수 
   - dns.ac  : dns answer section의 리소스 레코드 개수
 
-출력 feature (common.npy, structured numpy):
+출력 feature (dns.npy, structured numpy):
   - dns_tid_norm  (float32) : dns.tid min-max 정규화 (str -> float 변환)
   - dns_fl_norm (float32) : dns.fl min-max 정규화 (str -> float 변환)
   - dns_qc_norm   (float32) : dns.qc min-max 정규화
@@ -91,7 +91,7 @@ def fit_preprocess_dns(input_path: Path, out_dir: Path):
     # ---------- 4) vocab + norm_params 저장 ----------
     (out_dir / "dns_norm_params.json").write_text(json.dumps(norm_params, indent=2, ensure_ascii=False), encoding="utf-8-sig")
 
-    # ---------- 5) common.npy 저장 ----------
+    # ---------- 5) dns.npy 저장 ----------
     dtype = np.dtype([
         ("dns_tid_norm", "f4"),
         ("dns_fl_norm",  "f4"),

@@ -1,410 +1,191 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-s7comm.py
-s7comm 전용 feature 전처리 (ARP / modbus 버전 스타일)
+s7comm.py  
 
-두 모드 제공:
-  --fit        : min-max 정규화 파라미터 생성 + s7comm.npy 저장
-  --transform  : 기존 정규화 파라미터 사용하여 s7comm.npy 생성
+두 가지 모드 제공:
+  --fit       : norm_params 생성 후 s7comm.npy 저장
+  --transform : 기존 norm_params 사용
 
 입력 JSONL에서 사용하는 필드:
-  - protocol == "s7comm"
-  - s7comm.ros    : 1 또는 3 (int/str/["1"] 등 → min-max 정규화)
-  - s7comm.fn     : 기능 코드 (10진/16진 "0x04" → int 변환만, 정규화 X)
-  - s7comm.db     : 데이터 블록 번호 (int → min-max 정규화)
-  - s7comm.addr   : 레지스터 주소 (int → min-max 정규화)
+  - s7comm.ros  : s7comm ROS Control field
+  - s7comm.fn   : s7comm 명령어 코드
+  - s7comm.ic   : s7comm 아이템 개수
+  - s7comm.db   : s7comm DB 번호
+  - s7comm.addr : s7comm 주소값
 
 출력 feature (s7comm.npy, structured numpy):
-  - s7comm_ros_norm    (float32)  ← s7comm.ros min-max 정규화
-  - s7comm_fn          (float32)  ← s7comm.fn 정수값 (그대로, 정규화 X)
-  - s7comm_db_norm     (float32)  ← s7comm.db min-max 정규화
-  - s7comm_addr_norm   (float32)  ← s7comm.addr min-max 정규화
+  - s7comm_ros_norm  : s7comm.ros min-max 정규화
+  - s7comm_fn        : s7comm.fn 원본
+  - s7comm_fn_norm   : s7comm.fn min-max 정규화
+  - s7comm_ic_norm   : s7comm.ic min-max 정규화
+  - s7comm_db_norm   : s7comm.db min-max 정규화
+  - s7comm_addr_norm : s7comm.addr min-max 정규화
 
-보조 파일:
-  - s7comm_norm_params.json
-      {
-        "s7comm.ros":  {"min": ..., "max": ...},
-        "s7comm.db":   {"min": ..., "max": ...},
-        "s7comm.addr": {"min": ..., "max": ...}
-      }
-
-실시간 / 단일 패킷 처리:
-  - s7comm_norm_params.json 로드 후
-    preprocess_s7comm_with_norm(obj, norm_params) 호출
 """
-
-import json
+import json, sys
 import argparse
 import numpy as np
+import pandas as pd
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
+from min_max_normalize import minmax_cal, minmax_norm_scalar
+from change_value_type import _to_float, _hex_to_float
 
-# ---------------------------------------------
-# 공용 유틸
-# ---------------------------------------------
-def parse_int_field(val: Any) -> Optional[int]:
-    """
-    JSONL에서 들어오는 값이
-      - 10
-      - "10"
-      - "0x04"
-      - [10]
-      - ["10"]
-      - ["0x04"]
-    등일 수 있으므로 통일해서 int로 변환.
-    변환 실패 시 None 반환.
-    """
-    if isinstance(val, list) and val:
-        val = val[0]
-    if val is None:
-        return None
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 
-    s = str(val).strip()
-    if not s:
-        return None
+from utils.file_load import file_load
 
-    # 0x.., 0X.. 포함해서 자동 인식
-    try:
-        return int(s, 0)
-    except (TypeError, ValueError):
-        try:
-            return int(s)
-        except (TypeError, ValueError):
-            return None
-
-
-def minmax_norm(v: Optional[int], vmin: Optional[int], vmax: Optional[int]) -> float:
-    """
-    단순 min-max 정규화:
-      (v - vmin) / (vmax - vmin)
-
-    - v가 None 이거나,
-    - vmin/vmax가 없거나,
-    - vmin == vmax 인 경우 → 0.0 반환
-    """
-    if v is None or vmin is None or vmax is None:
-        return 0.0
-    if vmax == vmin:
-        return 0.0
-    return float(v - vmin) / float(vmax - vmin)
-
-
-# ---------------------------------------------
-# 한 레코드(s7comm)에서 raw 값 추출
-# ---------------------------------------------
-def extract_s7comm_raw(obj: Dict[str, Any]) -> Optional[Dict[str, Optional[int]]]:
-    """
-    protocol == "s7comm" 인 레코드에서 필요한 필드만 int로 파싱.
-
-    반환:
-      {
-        "ros":  int or None,
-        "fn":   int or None,
-        "db":   int or None,
-        "addr": int or None,
-      }
-    모든 값이 None 이면 None 반환.
-    """
-    ros = parse_int_field(obj.get("s7comm.ros"))
-    fn = parse_int_field(obj.get("s7comm.fn"))
-    db = parse_int_field(obj.get("s7comm.db"))
-    addr = parse_int_field(obj.get("s7comm.addr"))
-
-    if all(v is None for v in (ros, fn, db, addr)):
-        return None
-
-    return {
-        "ros": ros,
-        "fn": fn,
-        "db": db,
-        "addr": addr,
-    }
-
-
-# ---------------------------------------------
-# 단일 패킷 + 정규화까지 처리 (실시간/운영 용)
-# ---------------------------------------------
-def preprocess_s7comm_with_norm(obj: Dict[str, Any],
-                                norm_params: Dict[str, Any]) -> Optional[Dict[str, float]]:
-    """
-    단일 s7comm 패킷 obj에 대해
-    - s7comm_ros_norm
-    - s7comm_fn
-    - s7comm_db_norm
-    - s7comm_addr_norm
-    4개 feature를 모두 정규화된 값(0~1)으로 담은 dict 반환.
-
-    norm_params 예시 (s7comm_norm_params.json):
-        {
-          "s7comm.ros":  {"min": ..., "max": ...},
-          "s7comm.db":   {"min": ..., "max": ...},
-          "s7comm.addr": {"min": ..., "max": ...}
-        }
-    """
-    raw = extract_s7comm_raw(obj)
-    if raw is None:
-        return None
-
-    ros = raw["ros"]
-    fn = raw["fn"]
-    db = raw["db"]
-    addr = raw["addr"]
-
-    ros_min = norm_params.get("s7comm.ros", {}).get("min")
-    ros_max = norm_params.get("s7comm.ros", {}).get("max")
-    db_min = norm_params.get("s7comm.db", {}).get("min")
-    db_max = norm_params.get("s7comm.db", {}).get("max")
-    addr_min = norm_params.get("s7comm.addr", {}).get("min")
-    addr_max = norm_params.get("s7comm.addr", {}).get("max")
-
-    feat: Dict[str, float] = {
-        "s7comm_ros_norm": minmax_norm(ros, ros_min, ros_max),
-        "s7comm_fn": float(fn if fn is not None else 0.0),
-        "s7comm_db_norm": minmax_norm(db, db_min, db_max),
-        "s7comm_addr_norm": minmax_norm(addr, addr_min, addr_max),
-    }
-    return feat
-
-
-# ---------------------------------------------
-# FIT
-# ---------------------------------------------
-def fit_preprocess(input_path: Path, out_dir: Path):
-
+# fit 
+def fit_preprocess_s7comm(input_path: Path, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
+    df = pd.read_json(input_path, lines=True, encoding="utf-8-sig")
 
-    rows_raw: List[Dict[str, Optional[int]]] = []
+    hex_cols = ["s7comm.fn"]
+    norm_cols = ["s7comm.ros", "s7comm.fn", "s7comm.ic", "s7comm.db", "s7comm.addr"]
 
-    # min/max 추적용
-    ros_min = ros_max = None
-    db_min = db_max = None
-    addr_min = addr_max = None
+    if df.empty:
+        norm_params = {f"{c}_min": -1.0 for c in norm_cols} | {f"{c}_max": -1.0 for c in norm_cols}
 
-    with input_path.open("r", encoding="utf-8") as fin:
-        for line in fin:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
+        (out_dir / "s7comm_norm_params.json").write_text(json.dumps(norm_params, indent=2, ensure_ascii=False), encoding="utf-8-sig")
 
-            if obj.get("protocol") != "s7comm":
-                continue
-
-            raw = extract_s7comm_raw(obj)
-            if raw is None:
-                continue
-
-            rows_raw.append(raw)
-
-            # min/max 업데이트 (None 은 스킵)
-            if raw["ros"] is not None:
-                if ros_min is None or raw["ros"] < ros_min:
-                    ros_min = raw["ros"]
-                if ros_max is None or raw["ros"] > ros_max:
-                    ros_max = raw["ros"]
-
-            if raw["db"] is not None:
-                if db_min is None or raw["db"] < db_min:
-                    db_min = raw["db"]
-                if db_max is None or raw["db"] > db_max:
-                    db_max = raw["db"]
-
-            if raw["addr"] is not None:
-                if addr_min is None or raw["addr"] < addr_min:
-                    addr_min = raw["addr"]
-                if addr_max is None or raw["addr"] > addr_max:
-                    addr_max = raw["addr"]
-
-    # 정규화 파라미터 저장
-    norm_params = {
-        "s7comm.ros": {"min": ros_min, "max": ros_max},
-        "s7comm.db": {"min": db_min, "max": db_max},
-        "s7comm.addr": {"min": addr_min, "max": addr_max},
-    }
-
-    norm_path = out_dir / "s7comm_norm_params.json"
-    norm_path.write_text(
-        json.dumps(norm_params, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    print("✅ FIT 완료")
-    print(f"- s7comm_norm_params.json 저장: {norm_path}")
-
-    # numpy 구조화 배열 생성
-    dtype = np.dtype([
-        ("s7comm_ros_norm", "f4"),
-        ("s7comm_fn", "f4"),
-        ("s7comm_db_norm", "f4"),
-        ("s7comm_addr_norm", "f4"),
-    ])
-
-    data = np.zeros(len(rows_raw), dtype=dtype)
-
-    for idx, raw in enumerate(rows_raw):
-        ros = raw["ros"]
-        fn = raw["fn"]
-        db = raw["db"]
-        addr = raw["addr"]
-
-        data["s7comm_ros_norm"][idx] = minmax_norm(ros, ros_min, ros_max)
-        data["s7comm_fn"][idx] = float(fn if fn is not None else 0.0)
-        data["s7comm_db_norm"][idx] = minmax_norm(db, db_min, db_max)
-        data["s7comm_addr_norm"][idx] = minmax_norm(addr, addr_min, addr_max)
-
-    npy_path = out_dir / "s7comm.npy"
-    np.save(npy_path, data)
-
-    print(f"- s7comm.npy 저장: {npy_path}")
-    print(f"- shape: {data.shape}")
-
-    print("\n===== 앞 5개 s7comm 전처리 샘플 =====")
-    for i in range(min(5, len(data))):
-        sample = {name: data[name][i] for name in data.dtype.names}
-        print(sample)
-
-
-# ---------------------------------------------
-# TRANSFORM
-# ---------------------------------------------
-def transform_preprocess(input_path: Path, out_dir: Path):
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    norm_path = out_dir / "s7comm_norm_params.json"
-    if not norm_path.exists():
-        raise FileNotFoundError(
-            f"❌ {norm_path} 가 없습니다. 먼저 --fit 을 실행해서 정규화 파라미터를 생성하세요."
-        )
-
-    norm_params = json.loads(norm_path.read_text(encoding="utf-8"))
-
-    rows_norm: List[Dict[str, float]] = []
-
-    with input_path.open("r", encoding="utf-8") as fin:
-        for line in fin:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-
-            if obj.get("protocol") != "s7comm":
-                continue
-
-            feat = preprocess_s7comm_with_norm(obj, norm_params)
-            if feat is None:
-                continue
-
-            rows_norm.append(feat)
-
-    dtype = np.dtype([
-        ("s7comm_ros_norm", "f4"),
-        ("s7comm_fn", "f4"),
-        ("s7comm_db_norm", "f4"),
-        ("s7comm_addr_norm", "f4"),
-    ])
-
-    if not rows_norm:
-        # 비어 있는 경우에도 빈 npy는 만들어 두자
-        data_empty = np.zeros(0, dtype=dtype)
-        np.save(out_dir / "s7comm.npy", data_empty)
-        print("✅ TRANSFORM 완료 (empty)")
-        print(f"- s7comm.npy 저장: {out_dir/'s7comm.npy'} shape={data_empty.shape}")
+        dtype = np.dtype([
+            ("s7comm_ros_norm", "f4"),
+            ("s7comm_fn",        "f4"),
+            ("s7comm_fn_norm",   "f4"),
+            ("s7comm_ic_norm",   "f4"),
+            ("s7comm_db_norm",   "f4"),
+            ("s7comm_addr_norm", "f4"),
+        ])
+        data = np.zeros(0, dtype=dtype)
+        np.save(out_dir / "s7comm.npy", data)
         return
 
-    data = np.zeros(len(rows_norm), dtype=dtype)
+    n = len(df)
 
-    for idx, feat in enumerate(rows_norm):
-        data["s7comm_ros_norm"][idx] = float(feat["s7comm_ros_norm"])
-        data["s7comm_fn"][idx] = float(feat["s7comm_fn"])
-        data["s7comm_db_norm"][idx] = float(feat["s7comm_db_norm"])
-        data["s7comm_addr_norm"][idx] = float(feat["s7comm_addr_norm"])
+    # ---------- 1) hex 데이터 float 변환 ----------
+    for col in hex_cols:
+        if col in df.columns:
+            df[col] = df[col].map(_hex_to_float)
+    
+    # ---------- 2) min-max 파라미터 산출 ----------
+    norm_params = minmax_norm_scalar(df, norm_cols)
+    print (norm_params)
 
-    npy_path = out_dir / "s7comm.npy"
-    np.save(npy_path, data)
+    # ---------- 3) min-max 정규화 적용 ----------
+    vminmax = np.vectorize(minmax_cal, otypes=[np.float32])
+    for col in norm_cols:
+        series = pd.to_numeric(
+            df.get(col, pd.Series([np.nan]*n, index=df.index)),
+            errors="coerce"
+        ).astype("float32")
 
-    print("✅ TRANSFORM 완료")
-    print(f"- s7comm.npy 저장: {npy_path} shape={data.shape}")
+        arr = series.to_numpy(copy=False)
+        out = np.full(arr.shape, -1.0, dtype=np.float32)
 
+        mask = ~np.isnan(arr)
+        vmin = float(norm_params.get(f"{col}_min", 0.0))
+        vmax = float(norm_params.get(f"{col}_max", 0.0))
+
+        out[mask] = vminmax(arr[mask], vmin, vmax)
+        safe_col = col.replace(".", "_")
+        df[f"{safe_col}_norm"] = out
+
+    # ---------- 4) vocab + norm_params 저장 ----------
+    (out_dir / "s7comm_norm_params.json").write_text(json.dumps(norm_params, indent=2, ensure_ascii=False), encoding="utf-8-sig")
+
+    # ---------- 5) s7comm.npy 저장 ----------
+    dtype = np.dtype([
+        ("s7comm_ros_norm",  "f4"),
+        ("s7comm_fn",        "f4"),
+        ("s7comm_fn_norm",   "f4"),
+        ("s7comm_ic_norm",   "f4"),
+        ("s7comm_db_norm",   "f4"),
+        ("s7comm_addr_norm", "f4"),
+    ])
+    data = np.zeros(len(df), dtype=dtype)
+
+    data["s7comm_ros_norm"]  = df["s7comm_ros_norm"].to_numpy(dtype=np.float32, copy=False)
+    data["s7comm_fn"]        = df["s7comm.fn"].to_numpy(dtype=np.float32, copy=False)
+    data["s7comm_fn_norm"]   = df["s7comm_fn_norm"].to_numpy(dtype=np.float32, copy=False)
+    data["s7comm_ic_norm"]   = df["s7comm_ic_norm"].to_numpy(dtype=np.float32, copy=False)
+    data["s7comm_db_norm"]   = df["s7comm_db_norm"].to_numpy(dtype=np.float32, copy=False)
+    data["s7comm_addr_norm"] = df["s7comm_addr_norm"].to_numpy(dtype=np.float32, copy=False)
+
+    np.save(out_dir / "s7comm.npy", data)
+
+    print("\n===== 앞 5개 전처리 샘플 =====")
+    for i in range(min(5, len(data))):
+        print({
+            "s7comm_ros_norm"  : float(data["s7comm_ros_norm"][i]),
+            "s7comm_fn"        : float(data["s7comm_fn"][i]),
+            "s7comm_fn_norm"   : float(data["s7comm_fn_norm"][i]),
+            "s7comm_ic_norm"   : float(data["s7comm_ic_norm"][i]),
+            "s7comm_db_norm"   : float(data["s7comm_db_norm"][i]),
+            "s7comm_addr_norm" : float(data["s7comm_addr_norm"][i]),
+        })
+
+# 단일 패킷 전처리 함수 (운영 단계에서 사용)
+def preprocess_s7comm(records: Dict[str, Any], norm_params: Dict[str, Any]) -> Dict[str, Any]:
+    ros = records.get("s7comm.ros")
+    fn = records.get("s7comm.fn")
+    ic = records.get("s7comm.ic")
+    db = records.get("s7comm.db")
+    addr = records.get("s7comm.addr")
+
+    fn_float = _hex_to_float(fn)
+
+    ros_float = _to_float(ros)
+    ic_float = _to_float(ic)
+    db_float = _to_float(db)
+    addr_float = _to_float(addr)
+
+    ros_min, ros_max   = _to_float(norm_params.get("s7comm.ros_min")), _to_float(norm_params.get("s7comm.ros_max"))
+    fn_min, fn_max     = _to_float(norm_params.get("s7comm.fn_min")), _to_float(norm_params.get("s7comm.fn_max"))
+    ic_min, ic_max     = _to_float(norm_params.get("s7comm.ic_min")), _to_float(norm_params.get("s7comm.ic_max"))
+    db_min, db_max     = _to_float(norm_params.get("s7comm.db_min")), _to_float(norm_params.get("s7comm.db_max"))
+    addr_min, addr_max = _to_float(norm_params.get("s7comm.addr_min")), _to_float(norm_params.get("s7comm.addr_max"))
+
+    return {
+        "s7comm_ros_norm"  : float(minmax_cal(ros_float, ros_min, ros_max)),   
+        "s7comm_fn"        : fn_float,   
+        "s7comm_fn_norm"   : float(minmax_cal(fn_float, fn_min, fn_max)),   
+        "s7comm_ic_norm"   : float(minmax_cal(ic_float, ic_min, ic_max)),   
+        "s7comm_db_norm"   : float(minmax_cal(db_float, db_min, db_max)),   
+        "s7comm_addr_norm" : float(minmax_cal(addr_float, addr_min, addr_max)),   
+    }
+
+def transform_preprocess_s7comm(packet: Dict[str, Any], param_dir: Path) -> Dict[str, Any]:
+    norm_path = param_dir / "s7comm_norm_params.json"
+
+    norm_params = file_load("json", str(norm_path)) or {}
+
+    return preprocess_s7comm(packet, norm_params)
 
 # ---------------------------------------------
 # MAIN
 # ---------------------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-i", "--input", required=True, help="입력 JSONL 파일 경로")
-    parser.add_argument("-o", "--output", required=True, help="출력 디렉토리 경로")
-    parser.add_argument("--fit", action="store_true", help="정규화 파라미터 생성 + s7comm.npy 생성")
-    parser.add_argument("--transform", action="store_true", help="기존 파라미터로 s7comm.npy 생성")
+    parser.add_argument("-i", "--input", required=True)
+    parser.add_argument("-o", "--output", required=True)
+    parser.add_argument("--fit", action="store_true")
+    parser.add_argument("--transform", action="store_true")
 
     args = parser.parse_args()
     input_path = Path(args.input)
     out_dir = Path(args.output)
 
-    if args.fit and args.transform:
-        raise ValueError("❌ --fit 과 --transform 는 동시에 사용할 수 없습니다.")
-    if not args.fit and not args.transform:
-        raise ValueError("❌ 반드시 --fit 또는 --transform 중 하나를 선택하세요.")
-
     if args.fit:
-        fit_preprocess(input_path, out_dir)
+        fit_preprocess_s7comm(input_path, out_dir)
+    elif args.transform:
+        packets = file_load("jsonl", str(input_path)) or []
+        for pkt in packets:
+            if not isinstance(pkt, dict):
+                continue
+            feat = transform_preprocess_s7comm(pkt, out_dir)
+            print(feat)
     else:
-        transform_preprocess(input_path, out_dir)
-
-
-"""
-최종 데이터 사용 예시 (s7comm.npy)
-    import numpy as np
-
-    data = np.load("../result/output_s7comm/s7comm.npy")
-
-    # shape: (N, )
-    ros  = data["s7comm_ros_norm"].astype("float32")
-    fn   = data["s7comm_fn"].astype("float32")
-    db   = data["s7comm_db_norm"].astype("float32")
-    addr = data["s7comm_addr_norm"].astype("float32")
-
-    features = np.stack([ros, fn, db, addr], axis=1).astype("float32")
-
-
-실시간 단일 패킷 예시:
-
-    import json
-    from pathlib import Path
-    from preprocess_s7comm_feat import preprocess_s7comm_with_norm
-
-    out_dir = Path("../result/output_s7comm")
-    norm_params = json.loads((out_dir / "s7comm_norm_params.json").read_text(encoding="utf-8"))
-
-    pkt = {
-        "protocol": "s7comm",
-        "s7comm.ros": "1",
-        "s7comm.fn": "0x04",
-        "s7comm.db": "112",
-        "s7comm.addr": "46",
-    }
-
-    feat = preprocess_s7comm_with_norm(pkt, norm_params)
-    # feat = {
-    #   "s7comm_ros_norm": ...,
-    #   "s7comm_fn": ...,
-    #   "s7comm_db_norm": ...,
-    #   "s7comm_addr_norm": ...
-    # }
-
-usage:
-    # 1) 학습용 s7comm 데이터에서 정규화 파라미터 + feature 생성
-    python s7comm.py --fit -i "../data/ML_DL 학습.jsonl" -o "../result/output_s7comm"
-
-    # 2) 이후 새 데이터에 대해 같은 파라미터로 전처리
-    python s7comm.py --transform -i "../data/ML_DL_새데이터.jsonl" -o "../result/output_s7comm"
-"""
+        raise ValueError("❌ 반드시 --fit 또는 --transform 중 하나를 선택하세요.")
