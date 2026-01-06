@@ -7,19 +7,23 @@ pipeline_lstm_ae_simple.py
 1) 1.padding.py 실행해서 윈도우 패딩 + 일부 feature drop
 2) 2.LSTM_AE.py 실행해서 LSTM Autoencoder 학습
 
-우리가 바꿀 수 있는 옵션은 아래 5개만:
+우리가 바꿀 수 있는 옵션은 아래만:
   --window-size
   --epochs
   --batch-size
   --hidden-dim
   --latent-dim
+  --mc-samples (Bayesian 쓸 때)
 
-나머지 값들은 고정:
++ 추가:
+  --feat-weight-file : feature 가중치 설정 파일 (선택)
+
+고정:
   - 입력 JSONL : ../data/pattern_features.jsonl
   - 패딩 JSONL : ../result/pattern_features_padded_0.jsonl
-  - pad_value (padding) : 0
-  - drop_keys (padding) : ["deltat"]
-  - pad_value (train)   : 0.0
+  - pad_value (padding) : -1
+  - pad_value (train)   : -1
+  - drop_keys (padding) : []
   - exclude-file        : ../data/exclude.txt
   - model-output        : ../../result_train/data
   - device              : "cuda"
@@ -44,7 +48,7 @@ def run_cmd(cmd, cwd=None):
 def main():
     parser = argparse.ArgumentParser()
 
-    # ✅ 우리가 바꿀 수 있는 5개 옵션만 받기
+    # ✅ 우리가 바꿀 수 있는 옵션들
     parser.add_argument(
         "--window-size",
         type=int,
@@ -81,13 +85,20 @@ def main():
         default=5,
         help="Bayesian LSTM-AE에서 MC 샘플 수 (기본=5)"
     )
+    # 🔥 추가: feature weight 파일
+    parser.add_argument(
+        "--feat-weight-file",
+        type=str,
+        default="../data/feature_weights.txt",
+        help="feature 가중치 설정 파일 (없으면 균일 가중치 사용)",
+    )
 
     args = parser.parse_args()
 
     # 🔧 고정 값들
-    PAD_VALUE_PADDING = -1           # 1.padding.py --pad_value
-    PAD_VALUE_TRAIN = -1          # 2.LSTM_AE.py --pad_value
-    DROP_KEYS = []         # 1.padding.py --drop_keys
+    PAD_VALUE_PADDING = -1   # 1.padding.py --pad_value
+    PAD_VALUE_TRAIN = -1     # 2.LSTM_AE.py --pad_value
+    DROP_KEYS = []           # 1.padding.py --drop_keys
     DEVICE = "cuda"
     SEED = 42
 
@@ -105,7 +116,7 @@ def main():
         print(f"[ERROR] 2.LSTM_AE.py 를 찾을 수 없습니다: {train_script}")
         sys.exit(1)
     if not train_basian_script.exists():
-        print(f"[ERROR] 2.LSTM_AE.py 를 찾을 수 없습니다: {train_basian_script}")
+        print(f"[ERROR] 3.LSTM_AE_basian.py 를 찾을 수 없습니다: {train_basian_script}")
         sys.exit(1)
 
     # 경로들 고정
@@ -114,11 +125,18 @@ def main():
     exclude_file = (script_dir / ".." / "data" / "exclude.txt").resolve()
     model_output_dir = (script_dir / ".." / ".." / "result_train" / "data").resolve()
 
+    # feature weight 파일 경로 (옵션)
+    feat_weight_path = None
+    if args.feat_weight_file:
+        feat_weight_path = (script_dir / args.feat_weight_file).resolve()
+
     print("[PIPELINE] 고정 경로 설정")
-    print(f"  input_jsonl   : {input_jsonl}")
-    print(f"  padded_jsonl  : {padded_jsonl}")
-    print(f"  exclude_file  : {exclude_file}")
-    print(f"  model_output  : {model_output_dir}")
+    print(f"  input_jsonl       : {input_jsonl}")
+    print(f"  padded_jsonl      : {padded_jsonl}")
+    print(f"  exclude_file      : {exclude_file}")
+    print(f"  model_output_dir  : {model_output_dir}")
+    if feat_weight_path:
+        print(f"  feat_weight_file  : {feat_weight_path} (존재={feat_weight_path.exists()})")
 
     # --------------------------
     # 1단계: padding 실행
@@ -140,44 +158,14 @@ def main():
     print("==============================")
     run_cmd(cmd_padding)
 
-    # --------------------------
-    # 2단계: LSTM-AE 학습 실행
-    # --------------------------
-    model_output_dir.mkdir(parents=True, exist_ok=True)
-
-    cmd_train = [
-        sys.executable,
-        str(train_script),
-        "-i", str(padded_jsonl),
-        "-o", str(model_output_dir),
-        "--epochs", str(args.epochs),
-        "--batch_size", str(args.batch_size),
-        "--hidden_dim", str(args.hidden_dim),
-        "--latent_dim", str(args.latent_dim),
-        "--pad_value", str(PAD_VALUE_TRAIN),
-        "--device", DEVICE,
-        "--seed", str(SEED),
-    ]
-
-    # exclude.txt 고정 사용
-    cmd_train += ["--exclude-file", str(exclude_file)]
-
-    print("\n==============================")
-    print(" [STEP 2] 2.LSTM_AE.py 실행")
-    print("==============================")
-    run_cmd(cmd_train)
-
-    print("\n[PIPELINE] 전체 파이프라인 완료 ✅")
-    print(f"  ↳ 최종 모델 디렉토리: {model_output_dir}")
-
     # # --------------------------
-    # # 3단계: LSTM-AE_bayesian 학습 실행
+    # # 2단계: LSTM-AE 학습 실행
     # # --------------------------
     # model_output_dir.mkdir(parents=True, exist_ok=True)
 
     # cmd_train = [
     #     sys.executable,
-    #     str(train_basian_script),
+    #     str(train_script),
     #     "-i", str(padded_jsonl),
     #     "-o", str(model_output_dir),
     #     "--epochs", str(args.epochs),
@@ -187,31 +175,72 @@ def main():
     #     "--pad_value", str(PAD_VALUE_TRAIN),
     #     "--device", DEVICE,
     #     "--seed", str(SEED),
+    #     "--exclude-file", str(exclude_file),
     # ]
 
-    # # mc-samples 옵션 (wrapper에 없으면 기본값 5로)
-    # mc_samples = getattr(args, "mc_samples", None)
-    # if mc_samples is not None:
-    #     cmd_train += ["--mc-samples", str(mc_samples)]
+    # # feature weight 파일 전달 (2.LSTM_AE.py의 인자 이름과 맞춰야 함)
+    # if feat_weight_path is not None and feat_weight_path.exists():
+    #     cmd_train += ["--feature-weights-file", str(feat_weight_path)]
+    # else:
+    #     print("[PIPELINE] feature weight 파일이 없으므로 균일 가중치로 학습합니다.")
 
-    # # exclude.txt 고정 사용
-    # cmd_train += ["--exclude-file", str(exclude_file)]
 
     # print("\n==============================")
-    # print(" [STEP 3] 3.LSTM_AE_bayesian.py 실행")
+    # print(" [STEP 2] 2.LSTM_AE.py 실행")
     # print("==============================")
     # run_cmd(cmd_train)
 
     # print("\n[PIPELINE] 전체 파이프라인 완료 ✅")
     # print(f"  ↳ 최종 모델 디렉토리: {model_output_dir}")
 
+    # # Bayesian 버전(3.LSTM_AE_basian.py)만 단독으로 돌리고 싶으면 아래 블록을 사용.
+    # # ------------------------------------------------
+    # # ✅ deterministic 결과 덮어쓰기 방지: output_dir을 data_bayes로 분리
+    # model_output_dir_bayes = (script_dir / ".." / ".." / "result_train" / "data_bayes").resolve()
+    # model_output_dir_bayes.mkdir(parents=True, exist_ok=True)
+
+    # cmd_train_bayes = [
+    #     sys.executable,
+    #     str(train_basian_script),
+    #     "-i", str(padded_jsonl),
+    #     "-o", str(model_output_dir_bayes),
+    #     "--epochs", str(args.epochs),
+    #     "--batch_size", str(args.batch_size),
+    #     "--hidden_dim", str(args.hidden_dim),
+    #     "--latent_dim", str(args.latent_dim),
+    #     "--pad_value", str(PAD_VALUE_TRAIN),
+    #     "--device", DEVICE,
+    #     "--seed", str(SEED),
+    #     "--exclude-file", str(exclude_file),
+    #     "--mc-samples", str(args.mc_samples),
+    # ]
+
+    # # ✅ 2.LSTM_AE.py와 동일하게 --feature-weights-file 로 전달
+    # if feat_weight_path is not None and feat_weight_path.exists():
+    #     cmd_train_bayes += ["--feature-weights-file", str(feat_weight_path)]
+    # else:
+    #     print("[PIPELINE] feature weight 파일이 없으므로 균일 가중치로 Bayesian 학습합니다.")
+
+    # print("\n==============================")
+    # print(" [STEP 3] 3.LSTM_AE_basian.py 실행 (Bayesian)")
+    # print("==============================")
+    # run_cmd(cmd_train_bayes)
+
+    # print("\n[PIPELINE] Bayesian 학습 완료 ✅")
+    # print(f"  ↳ Bayesian 모델 디렉토리: {model_output_dir_bayes}")
+    # # ------------------------------------------------
+
 
 
 if __name__ == "__main__":
     main()
 
+
 """
-python 0.run_pipeline_pattern.py --window-size 16 --epochs 300 --batch-size 128 --hidden-dim 128 --latent-dim 64 --mc-samples 10
+python 0.run_pipeline_pattern.py --window-size 80 --epochs 300 --batch-size 128 --hidden-dim 128 --latent-dim 64 --mc-samples 10
+
+python 0.run_pipeline_pattern.py --window-size 80 --epochs 300 --batch-size 64 --hidden-dim 64 --latent-dim 64 --feat-weight-file "../data/feature_weights.txt"
+
 
 | 인자             | 설명                     | 주요 영향              |
 | --------------- | ------------------------ | -------------------- |

@@ -41,17 +41,26 @@ import random
 
 import numpy as np
 from tensorflow.keras.callbacks import EarlyStopping
+import shutil
 
+import matplotlib
+matplotlib.use("Agg")  # GUI 없이 PNG 저장 (headless 안전)
+
+import matplotlib.pyplot as plt
 
 # -------------------------------------------------------
 # 공통 유틸
 # -------------------------------------------------------
-def compute_window_errors(X_true: np.ndarray,
-                          X_pred: np.ndarray,
-                          pad_value: float) -> np.ndarray:
+def compute_window_errors(
+    X_true: np.ndarray,
+    X_pred: np.ndarray,
+    pad_value: float,
+    feature_weights: np.ndarray | None = None,
+) -> np.ndarray:
     """
     X_true, X_pred: shape (N, T, D)
     pad_value    : 패딩 값 (해당 timestep은 마스크)
+    feature_weights: shape (D,), None이면 균등 가중치
 
     반환:
       errors: shape (N,), 윈도우별 재구성 오차
@@ -60,13 +69,54 @@ def compute_window_errors(X_true: np.ndarray,
     not_pad = np.any(np.not_equal(X_true, pad_value), axis=-1)
     mask = not_pad.astype(np.float32)
 
-    # 타임스텝별 MSE (N, T)
-    se = np.mean((X_pred - X_true) ** 2, axis=-1)
+    # 타임스텝별 SE (N, T, D)
+    se = (X_pred - X_true) ** 2  # (N, T, D)
+
+    if feature_weights is not None:
+        # (1, 1, D)로 broadcast
+        se = se * feature_weights[np.newaxis, np.newaxis, :]
+
+    # feature 차원 평균 → (N, T)
+    se = np.mean(se, axis=-1)
+
     se_masked = se * mask
 
     denom = np.sum(mask, axis=-1) + 1e-8
     errors = np.sum(se_masked, axis=-1) / denom
     return errors
+
+def save_training_loss_curve(history: Dict[str, List[float]], out_png: Path):
+    """
+    history 예:
+      {"train_loss": [...], "val_loss": [...]}
+
+    out_png:
+      저장할 PNG 경로
+    """
+    train_loss = history.get("train_loss", [])
+    val_loss = history.get("val_loss", [])
+
+    if not train_loss:
+        print("[WARN] save_training_loss_curve: train_loss가 비어 있어 그래프를 저장하지 않습니다.")
+        return
+
+    epochs = np.arange(1, len(train_loss) + 1)
+
+    plt.figure()
+    plt.plot(epochs, train_loss, label="train_loss")
+    if val_loss:
+        plt.plot(epochs, val_loss, label="val_loss")
+
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training Loss Curve")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(str(out_png), dpi=150)
+    plt.close()
+
+    print(f"[INFO] training loss curve 저장 → {out_png}")
 
 
 def set_global_seed(seed: int):
@@ -288,7 +338,7 @@ def main():
     parser.add_argument(
         "--pad_value",
         type=float,
-        default=0.0,
+        default=-1.0,
         help="패딩 값 (loss 계산 시 mask용, default: 0.0)",
     )
     parser.add_argument(
@@ -329,6 +379,17 @@ def main():
         "--inspect-only",
         action="store_true",
         help="데이터를 로드/요약 출력만 하고 학습은 수행하지 않음",
+    )
+    # ⭐ feature 가중치 파일
+    parser.add_argument(
+        "--feature-weights-file",
+        type=str,
+        default=None,
+        help=(
+            "각 feature별 가중치를 정의한 TXT 파일 경로. "
+            "형식: 'feature_name weight'. "
+            "정의되지 않은 feature는 1.0 가중치 사용."
+        ),
     )
 
     args = parser.parse_args()
@@ -388,6 +449,45 @@ def main():
     N, T, D = X.shape
     print(f"[INFO] 데이터 shape: N={N}, T={T}, D={D}")
     print(f"[INFO] 최종 feature 수: {len(feature_keys)}")
+
+    # -----------------------------
+    # feature별 가중치 설정 (기본 1.0) + 파일에서 override
+    # -----------------------------
+    feature_weights = np.ones(len(feature_keys), dtype=np.float32)
+
+    if args.feature_weights_file:
+        fw_path = Path(args.feature_weights_file)
+        if not fw_path.exists():
+            print(f"[WARN] feature-weights-file 이 존재하지 않습니다: {fw_path}")
+        else:
+            print(f"[INFO] feature-weights-file 로드: {fw_path}")
+
+            weight_map: dict[str, float] = {}
+            with fw_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split()
+                    if len(parts) < 2:
+                        print(f"[WARN] 잘못된 weight 라인(무시): {line}")
+                        continue
+                    name = parts[0]
+                    try:
+                        w = float(parts[1])
+                    except ValueError:
+                        print(f"[WARN] weight 파싱 실패(무시): {line}")
+                        continue
+                    weight_map[name] = w
+
+            # feature_keys 순서에 맞춰 weight 배열 구성
+            for i, k in enumerate(feature_keys):
+                if k in weight_map:
+                    feature_weights[i] = weight_map[k]
+
+    print("[INFO] feature-wise weights (앞 10개):")
+    for k, w in list(zip(feature_keys, feature_weights))[:10]:
+        print(f"  - {k:25s}: {w}")
 
     # 👀 inspect-only 모드면 여기서 데이터만 보고 종료
     if args.inspect_only:
@@ -468,40 +568,41 @@ def main():
     model = models.Model(inputs=encoder_inputs, outputs=outputs, name="lstm_autoencoder")
     model.summary()
 
-    # 4) 손실 함수 (pad_value 마스킹)
+    # 4) 손실 함수 (pad_value 마스킹 + feature별 가중치)
     pad_value = float(args.pad_value)
 
-    def make_masked_mse(pad_val: float):
-        def masked_mse(y_true, y_pred):
+    def make_masked_weighted_mse(pad_val: float, feat_w: np.ndarray):
+        feat_w_tf = tf.constant(feat_w, dtype=tf.float32)  # (D,)
+
+        def masked_weighted_mse(y_true, y_pred):
             # y_true, y_pred: (B, T, D)
-            # 모든 feature가 pad_val인 timestep은 마스크 0
-            # (원본 PyTorch 구현: (batch != pad_value).any(dim=-1))
-            not_pad = tf.reduceAny(tf.not_equal(y_true, pad_val), axis=-1)  # (B, T) bool
-            mask = tf.cast(not_pad, tf.float32)                              # (B, T)
 
-            se = tf.reduceMean(tf.square(y_pred - y_true), axis=-1)        # (B, T)
-            se_masked = se * mask
-
-            # eps로 0 나누기 방지
-            loss = tf.reduceSum(se_masked) / (tf.reduceSum(mask) + 1e-8)
-            return loss
-        return masked_mse
-
-    # 위 reduceAny / reduceMean / reduceSum 오타 주의:
-    import tensorflow as tf  # 이미 위에서 했지만 안전하게
-    def make_masked_mse(pad_val: float):
-        def masked_mse(y_true, y_pred):
+            # 1) pad timestep 마스크
             not_pad = tf.reduce_any(tf.not_equal(y_true, pad_val), axis=-1)  # (B, T) bool
-            mask = tf.cast(not_pad, tf.float32)                              # (B, T)
+            
+            
+            valid_neg1 = tf.not_equal(y_true, -1.0)
+            valid_neg2 = tf.not_equal(y_true, -2.0)
+            
+            # 3. 둘 다 True여야 유효한 데이터 (AND 연산)
+            #    즉, -1도 아니고 AND -2도 아니어야 함
+            not_pad = tf.logical_and(valid_neg1, valid_neg2)
+            mask = tf.cast(not_pad, tf.float32)  # (B, T)
 
-            se = tf.reduce_mean(tf.square(y_pred - y_true), axis=-1)        # (B, T)
-            se_masked = se * mask
+            # 2) feature별 squared error
+            se = tf.square(y_pred - y_true)      # (B, T, D)
+            se = se * feat_w_tf                  # (B, T, D)
 
-            loss = tf.reduce_sum(se_masked) / (tf.reduce_sum(mask) + 1e-8)
+            # 4) pad timestep 마스킹
+            se_masked = se * tf.cast(not_pad, tf.float32) # (B, T, D)
+
+            # 5) 전체 평균
+            loss = tf.reduce_sum(se_masked) / (tf.reduce_sum(tf.cast(not_pad, tf.float32)) + 1e-8)
             return loss
-        return masked_mse
 
-    loss_fn = make_masked_mse(pad_value)
+        return masked_weighted_mse
+
+    loss_fn = make_masked_weighted_mse(pad_value, feature_weights)
 
     optimizer = optimizers.Adam(learning_rate=args.lr)
     model.compile(optimizer=optimizer, loss=loss_fn)
@@ -533,13 +634,18 @@ def main():
 
     # 6) train set reconstruction error 기반 threshold 계산
     print("[INFO] train set reconstruction error 계산...")
-    X_train_pred = model.predict(X_train,
-                                 batch_size=args.batch_size,
-                                 verbose=1)
+    X_train_pred = model.predict(
+        X_train,
+        batch_size=args.batch_size,
+        verbose=1,
+    )
 
-    errors_train = compute_window_errors(X_train,
-                                         X_train_pred,
-                                         pad_value)
+    errors_train = compute_window_errors(
+        X_train,
+        X_train_pred,
+        pad_value,
+        feature_weights=feature_weights,
+    )
 
     print(f"[INFO] train error 통계: "
           f"mean={errors_train.mean():.4f}, "
@@ -575,6 +681,25 @@ def main():
     model.save(model_path)
     print(f"[INFO] 모델 저장 → {model_path}")
 
+    # 🔥 feature weight 파일을 모델 디렉토리로 복사 + config에는 상대 파일명만 기록
+    feature_weights_file_for_config = None
+    if args.feature_weights_file:
+        src = Path(args.feature_weights_file)
+        if src.exists():
+            dst = output_dir / src.name  # 예: output_dir/feature_weights.txt
+            try:
+                shutil.copy2(src, dst)
+                print(f"[INFO] feature_weights 파일 복사 → {dst}")
+                # config 에는 모델 디렉토리 기준 상대 경로(파일명)만 저장
+                feature_weights_file_for_config = dst.name
+            except Exception as e:
+                print(f"[WARN] feature_weights 파일 복사 실패: {e}")
+                # 복사 실패해도 일단 원래 경로를 기록
+                feature_weights_file_for_config = str(src)
+        else:
+            print(f"[WARN] feature_weights 파일이 존재하지 않습니다: {src}")
+            feature_weights_file_for_config = str(src)
+
     config = {
         "input_jsonl": str(input_path),
         "N": int(N),
@@ -593,6 +718,8 @@ def main():
         "framework": "tensorflow.keras",
         "seed": args.seed,
         "exclude_features": merged_exclude,
+        # 🔥 여기만 기존 코드에서 변경됨
+        "feature_weights_file": feature_weights_file_for_config,
     }
     config_path = output_dir / "config.json"
     with config_path.open("w", encoding="utf-8") as f:
@@ -604,35 +731,32 @@ def main():
         json.dump(history, f, indent=2, ensure_ascii=False)
     print(f"[INFO] train_log 저장 → {log_path}")
 
-    # 8) loss / val_loss 곡선 그림 저장
-    try:
-        epochs_range = range(1, len(history["train_loss"]) + 1)
-
-        plt.figure(figsize=(8, 5))
-        plt.plot(epochs_range, history["train_loss"], label="train_loss")
-        plt.plot(epochs_range, history["val_loss"], label="val_loss")
-        plt.xlabel("Epoch")
-        plt.ylabel("Loss")
-        plt.title("LSTM-AE Training / Validation Loss")
-        plt.legend()
-        plt.grid(True)
-
-        plot_path = output_dir / "loss_curve.png"
-        plt.tight_layout()
-        plt.savefig(plot_path)
-        plt.close()
-        print(f"[INFO] loss_curve.png 저장 → {plot_path}")
-    except Exception as e:
-        print(f"[WARN] loss 그래프 저장 중 오류 발생: {e}")
-
+    loss_png_path = output_dir / "training_loss_curve.png"
+    save_training_loss_curve(history, loss_png_path)
 
 if __name__ == "__main__":
     main()
 
 
 """
-python 2.LSTM_AE.py -i "../result/pattern_features_padded_0.jsonl" -o "../../result_train/data" --epochs 400 --batch_size 64 --hidden_dim 64 --latent_dim 64 --pad_value 0.0 --device cuda --seed 42 --exclude-file "../data/exclude.txt"
+예시 실행:
+
+python 2.LSTM_AE.py \
+  -i "../result/pattern_features_padded_0.jsonl" \
+  -o "../../result_train/data" \
+  --epochs 400 --batch_size 64 \
+  --hidden_dim 64 --latent_dim 64 \
+  --pad_value 0.0 --device cuda --seed 42 \
+  --exclude-file "../data/exclude.txt" \
+  --feature-weights-file "../data/feature_weights.txt"
 
 inspect 모드:
-python 2.LSTM_AE.py -i "../result/pattern_features_padded_0.jsonl" -o "../../result_train/inspect" --pad_value 0.0 --exclude-file "../data/exclude.txt" --inspect-only
+python 2.LSTM_AE.py \
+  -i "../result/pattern_features_padded_0.jsonl" \
+  -o "../../result_train/inspect" \
+  --pad_value 0.0 \
+  --exclude-file "../data/exclude.txt" \
+  --inspect-only
+
+python 2.LSTM_AE.py -i "../result/pattern_features_padded_0.jsonl" -o "../../result_train/data" --epochs 400 --batch_size 64 --hidden_dim 32 --latent_dim 8 --lr 5e-4 --pad_value -1 --seed 42 --exclude-file "../data/exclude.txt" --feature-weights-file "../data/feature_weights.txt"
 """
