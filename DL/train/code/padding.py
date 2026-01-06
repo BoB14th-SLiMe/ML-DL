@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+padding.py
+index 데이터를 기반으로 window_size 만큼 padding을 채움
 
+"""
 import json
 import argparse
 
@@ -48,9 +52,7 @@ def pad_window(win: dict, window_size: int, pad_value: float) -> dict:
             new_seq.append({k: pad_value for k in feature_keys})
 
     return {
-        "window_id": win.get("window_id"),
         "pattern": win.get("pattern"),
-        "index": list(range(window_size)),
         "sequence_group": new_seq,
     }
 
@@ -62,7 +64,7 @@ if __name__ == "__main__":
     ap.add_argument("--pad_value", type=float, default=-1.0)
     args = ap.parse_args()
 
-    out_path = "a.jsonl"  # 하드코딩 출력 파일
+    out_path = "a.jsonl"
 
     with open(args.input, "r", encoding="utf-8") as f, open(out_path, "w", encoding="utf-8") as out:
         for line in f:
@@ -99,6 +101,6 @@ if __name__ == "__main__":
             out.write(json.dumps(out_obj, ensure_ascii=False) + "\n")
 
 """
-python 1.padding.py -i ../data/pattern_features.jsonl --window_size 76 --pad_value -1 > a.jsonl
+python padding.py -i ../../results/train/preprocess_pattern.jsonl --window_size 76 --pad_value -1
 
 """
