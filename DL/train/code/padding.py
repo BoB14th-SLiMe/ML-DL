@@ -3,12 +3,9 @@
 """
 padding.py
 index 데이터를 기반으로 window_size 만큼 padding을 채움
-
 """
 import json
 import argparse
-
-META_KEYS = {"index", "packet_idx"}
 
 
 def _to_dict(x):
@@ -30,7 +27,7 @@ def pad_window(win: dict, window_size: int, pad_value: float) -> dict:
         return {}
 
     first_pkt = _to_dict(seq[0])
-    feature_keys = [k for k in first_pkt.keys() if k not in META_KEYS]
+    feature_keys = list(first_pkt.keys())
     if not feature_keys:
         return {}
 
@@ -100,7 +97,7 @@ if __name__ == "__main__":
 
             out.write(json.dumps(out_obj, ensure_ascii=False) + "\n")
 
+
 """
 python padding.py -i ../../results/train/preprocess_pattern.jsonl --window_size 76 --pad_value -1
-
 """
