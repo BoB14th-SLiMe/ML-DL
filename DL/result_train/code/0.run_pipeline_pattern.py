@@ -135,6 +135,37 @@ def main():
         print(f"  [{idx}] {ip}")
     print("================================================")
 
+
+    # # 1) 0.attack_result.py
+    # #    attack_jsonl → attack_result_<tag>.csv (GT 라벨)
+    # attack_tags = [
+    #     "attack",
+    #     "attack_ver2",
+    #     "attack_ver5",
+    #     "attack_ver5_1",
+    #     "attack_ver5_2",
+    #     "attack_ver11",
+    # ]
+    # data_dir = here / ".." / "data"
+    # result_dir = here / ".." / "result"
+    # pre_dir = here / ".." / ".." / "preprocessing" / "result"
+    # attack_jsonl = data_dir / f"{tag}.jsonl"
+    # attack_window_jsonl = result_dir / f"{tag}_window.jsonl"
+    # feat_output1 = result_dir / f"{tag}.jsonl"
+    # for tag in attack_tags:
+    #     cmd0 = [
+    #         sys.executable,
+    #         "0.attack_result.py",
+    #         "--input", str(attack_jsonl),
+    #         "--window-size", str(window_size),
+    #         "--step-size", str(step_size),
+    #         "--output", str(attack_window_jsonl),
+    #         "--mode", "auto",
+    #         "--pre-dir", str(pre_dir),
+    #         "--feat-output1", str(feat_output1),
+    #     ]
+    #     run_cmd(cmd0, cwd=here)
+
     # 각 입력 파일에 대해 파이프라인 전체 수행
     for idx, attack_jsonl in enumerate(input_paths, start=1):
         attack_jsonl = attack_jsonl.resolve()
@@ -157,71 +188,61 @@ def main():
         print(f"[INFO] eval_metrics_json : {eval_metrics_json}")
         print(f"[INFO] analyze_json      : {analyze_json}")
 
-        # 1) 0.attack_result.py
-        #    attack_jsonl → attack_result_<tag>.csv (GT 라벨)
-        cmd0 = [
-            sys.executable,
-            "0.attack_result.py",
-            "--input", str(attack_jsonl),
-            "--window-size", str(window_size),
-            "--step-size", str(step_size),
-            "--output", str(attack_result_csv),
-            # 0.attack_result.py 내부에 --mode auto 등이 있으면,
-            # 파일명(tag)에 따라 자동으로 xgt / fc6 기준을 선택하도록 설계해둔 상태라고 가정.
-        ]
-        run_cmd(cmd0, cwd=here)
-
         # 2) 1.benchmark.py
-        #    attack_jsonl → 윈도우 feature + LSTM-AE MSE 계산
+        #    attack_jsonl → 윈도우 feature + LSTM-AE MSE 계산 + 평가까지 (통합 버전)
         cmd1 = [
             sys.executable,
-            "1.benchmark.py",
-            "--input", str(attack_jsonl),
-            "--pre-dir", str(pre_dir),
-            "--window-size", str(window_size),
-            "--step-size", str(step_size),
+            "1.benchmark.py",              # ✅ 통합 버전 (benchmark_eval.py 내용으로 교체된 상태)
+            "--input", str(attack_jsonl),  # 윈도우 JSONL
+            "--model-dir", str(model_dir), # LSTM-AE 모델 디렉토리
+            "--attack-csv", str(attack_jsonl),  # GT도 동일 JSONL 사용
             "--output-dir", str(benchmark_out_dir),
-            "--model-dir", str(model_dir),
-            "--batch-size", "128",          # 고정 (요청대로 CLI로는 expose 안 함)
-            "--tag", tag,                   # 파일별로 다른 이름으로 저장
+            "--window-size", str(window_size),
+            "--tag", tag,
+            "--feature-weights", "../data/feature_weights.txt"
         ]
+
         if threshold is not None:
             cmd1.extend(["--threshold", str(threshold)])
 
         run_cmd(cmd1, cwd=here)
 
-        # 3) 2.eval_detection_metrics.py
-        #    attack_result_<tag>.csv + window_scores_<tag>.csv → detection metrics
-        cmd2 = [
-            sys.executable,
-            "2.eval_detection_metrics.py",
-            "--attack-csv", str(attack_result_csv),
-            "--pred-csv", str(window_scores_csv),
-            "--tag", tag,
-            "--ignore-pred-minus1",
-            # --output-json 을 직접 넘기고 싶으면 여기에 추가하면 됨:
-            # "--output-json", str(eval_metrics_json),
-        ]
-        run_cmd(cmd2, cwd=here)
+
+        # # 3) 2.eval_detection_metrics.py
+        # #    attack_<tag>.jsonl + window_scores_<tag>.csv → detection metrics
+        # attack_jsonl_path = here / f"../result/{tag}.jsonl"  # ✅ GT JSONL 경로
+        # window_scores_csv = benchmark_out_dir / f"window_scores_{tag}.csv"
+        # eval_metrics_json = benchmark_out_dir / f"metrics_{tag}.json"
+
+        # cmd2 = [
+        #     sys.executable,
+        #     "2.eval_detection_metrics.py",
+        #     "--attack-csv", str(attack_jsonl_path),   # ✅ JSONL도 자동 인식됨
+        #     "--pred-csv", str(window_scores_csv),
+        #     "--tag", tag,
+        #     "--ignore-pred-minus1",
+        #     "--output-json", str(eval_metrics_json),
+        # ]
+        # run_cmd(cmd2, cwd=here)
 
         # 4) 3.analyze_mse_dist.py
         #    attack_result_<tag>.csv + window_scores_<tag>.csv → MSE 통계
-        cmd3 = [
-            sys.executable,
-            "3.analyze_mse_dist.py",
-            "--attack-csv", str(attack_result_csv),
-            "--pred-csv", str(window_scores_csv),
-            "--tag", tag,
-            # "--output-json", str(analyze_json),  # 원하면 명시적 지정 가능
-        ]
-        run_cmd(cmd3, cwd=here)
+        # cmd3 = [
+        #     sys.executable,
+        #     "3.analyze_mse_dist.py",
+        #     "--attack-csv", str(attack_result_csv),
+        #     "--pred-csv", str(window_scores_csv),
+        #     "--tag", tag,
+        #     # "--output-json", str(analyze_json),  # 원하면 명시적 지정 가능
+        # ]
+        # run_cmd(cmd3, cwd=here)
 
-        print(f"[INFO] tag={tag} 파이프라인 완료 🎉")
-        print(f"  - GT CSV               : {attack_result_csv}")
-        print(f"  - Benchmark dir        : {benchmark_out_dir}")
-        print(f"  - window_scores CSV    : {window_scores_csv}")
-        print(f"  - Detection metrics    : {eval_metrics_json} (또는 2번 스크립트 내부 규칙대로)")
-        print(f"  - MSE dist summary     : {analyze_json} (또는 3번 스크립트 내부 규칙대로)")
+        # print(f"[INFO] tag={tag} 파이프라인 완료 🎉")
+        # print(f"  - GT CSV               : {attack_result_csv}")
+        # print(f"  - Benchmark dir        : {benchmark_out_dir}")
+        # print(f"  - window_scores CSV    : {window_scores_csv}")
+        # print(f"  - Detection metrics    : {eval_metrics_json} (또는 2번 스크립트 내부 규칙대로)")
+        # print(f"  - MSE dist summary     : {analyze_json} (또는 3번 스크립트 내부 규칙대로)")
 
     print("\n[INFO] 모든 입력 파일에 대한 파이프라인 완료 ✅")
 
@@ -235,7 +256,11 @@ if __name__ == "__main__":
 1) JSONL 6개를 한 번에 처리 (5번만 나중에 따로 threshold 조정해서 돌리고 싶으면,
    여기서는 공통 설정으로 먼저 한 번 돌리고, 5번 파일만 따로 다시 실행하면 됨)
 
-python 0.run_pipeline_pattern.py --inputs ../data/attack.jsonl ../data/attack_ver2.jsonl ../data/attack_ver5.jsonl ../data/attack_ver5_1.jsonl ../data/attack_ver5_2.jsonl ../data/attack_ver11.jsonl --window-size 16 --step-size 4 --threshold 0.11
+python 0.run_pipeline_pattern.py --inputs ../result/attack.jsonl ../result/attack_ver2.jsonl ../result/attack_ver5.jsonl ../result/attack_ver5_1.jsonl ../result/attack_ver5_2.jsonl ../result/attack_ver11.jsonl --window-size 80 --step-size 1 --threshold 0.11
+
+python 0.run_pipeline_pattern.py --inputs ../result/16/attack_ver2.jsonl ../result/16/attack_ver5.jsonl ../result/16/attack_ver5_1.jsonl ../result/16/attack_ver5_2.jsonl ../result/16/attack_ver11.jsonl --window-size 16 --step-size 1 --threshold 0.11
+python 0.run_pipeline_pattern.py --inputs ../result/80/attack_ver2.jsonl ../result/80/attack_ver5.jsonl ../result/80/attack_ver5_1.jsonl ../result/80/attack_ver5_2.jsonl ../result/80/attack_ver11.jsonl --window-size 80 --step-size 1 --threshold 0.11
+
 
 2) 5번 시나리오만 threshold 다르게 다시 돌리고 싶을 때:
 
