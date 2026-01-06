@@ -10,7 +10,7 @@ import json
 import re
 import sys
 from pathlib import Path
-
+from typing import List
 
 MISSING_DEFAULT = -1.0
 SLOT_MISSING_SENTINEL = -1.0
@@ -82,6 +82,30 @@ BASE_FEATURE_COLUMNS = [
     "dns_qc_norm",
     "dns_ac_norm",
 ]
+
+def write_feature_weights_txt(
+    out_jsonl_path: Path,
+    feature_columns: List[str],
+    weight: float = 1.0,
+) -> Path:
+    weights_path = out_jsonl_path.parent / "feature_weights.txt"
+
+    ordered = ["protocol", "delta_t"] + list(feature_columns) + ["match"]
+
+    seen = set()
+    names: List[str] = []
+    for n in ordered:
+        if n in seen:
+            continue
+        seen.add(n)
+        names.append(n)
+
+    lines = ["#   use feature_name    weight"]
+    for name in names:
+        lines.append(f"O {name:<28} {float(weight):.1f}")
+
+    weights_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return weights_path
 
 
 def protocol_to_code(p):
@@ -684,6 +708,9 @@ def main():
     gws = determine_global_window_size(input_path)
     print(f"[INFO] global_window_size: {gws}")
     print(f"[INFO] feature_dim: {len(feature_columns)}")
+
+    wpath = write_feature_weights_txt(out_path, feature_columns, weight=1.0)
+    print(f"[INFO] feature_weights saved: {wpath}")
 
     base_feat_template = {k: float(MISSING_DEFAULT) for k in feature_columns}
 
