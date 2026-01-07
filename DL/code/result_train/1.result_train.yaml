@@ -1,8 +1,8 @@
 defaults:
   # 공통
   model_dir: ../../results/model  # model.h5, config.json, feature_keys.txt, threshold.json 위치
-  output_dir: ../result/benchmark
-  feature_weights_file: ../train/data/feature_weights.txt
+  output_dir: ../../results/result_train
+  feature_weights_file: ../../results/train/feature_weights.txt
 
   window_size: 80
   batch_size: 128
@@ -19,16 +19,16 @@ defaults:
 
 runs:
   - tag: attack_ver2
-    input: ../result/attack_ver2.jsonl
+    input: ../../results/attack/attack_ver2.jsonl
 
   - tag: attack_ver5
-    input: ../result/attack_ver5.jsonl
+    input: ../../results/attack/attack_ver5.jsonl
 
   - tag: attack_ver5_1
-    input: ../result/attack_ver5_1.jsonl
+    input: ../../results/attack/attack_ver5_1.jsonl
 
   - tag: attack_ver5_2
-    input: ../result/attack_ver5_2.jsonl
+    input: ../../results/attack/attack_ver5_2.jsonl
 
   - tag: attack_ver11
-    input: ../result/attack_ver11.jsonl
+    input: ../../results/attack/attack_ver11.jsonl
