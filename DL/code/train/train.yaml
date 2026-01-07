@@ -2,9 +2,9 @@ mode: normal    # normal | bayesian
 # mode: bayesian    # normal | bayesian
 
 input_jsonl: "../../results/train/preprocess_pattern.jsonl"
-output_dir: "../../results/model"
+output_dir: "../../results/model/detect_model"
 
-feature_policy_file: "../../results/train/feature_policy.txt"
+feature_policy_file: "../../results/train/feature_weights.txt"
 
 window_size: 80 
 pad_value: -1.0

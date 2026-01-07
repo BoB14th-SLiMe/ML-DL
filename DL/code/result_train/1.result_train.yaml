@@ -1,6 +1,6 @@
 defaults:
   # 공통
-  model_dir: ../../results/model  # model.h5, config.json, feature_keys.txt, threshold.json 위치
+  model_dir: ../../results/model/detect_model  # model.h5, config.json, feature_keys.txt, threshold.json 위치
   output_dir: ../../results/result_train
   feature_weights_file: ../../results/train/feature_weights.txt
 
