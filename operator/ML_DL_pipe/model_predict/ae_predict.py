@@ -236,11 +236,6 @@ def _ensure_btf_np(X: np.ndarray, model: Any) -> np.ndarray:
         if X.shape[1] == exp_f and X.shape[2] != exp_f:
             return np.transpose(X, (0, 2, 1)).copy()
 
-    # 휴리스틱(자주 나오는 케이스): (B,36,80)->(B,80,36)
-    if X.shape[1] < X.shape[2] and X.shape[1] <= 512:
-        # feature_dim이 time보다 작을 확률이 높음
-        return np.transpose(X, (0, 2, 1)).copy()
-
     return X
 
 
