@@ -1,0 +1,46 @@
+version: 1
+
+defaults:
+  window_size: 80
+  step_size: 5
+  mode: auto
+
+  model_dir: ../../../operating/ML/model
+  model_loader: ../../../operating/ML/code/1-1.model_load.py
+  ml_threshold: -126
+
+  run_extract: true
+  run_ml: true
+
+  pre_dir: ../../results/preprocessing
+
+jobs:
+  - name: attack_ver2
+    input: ../../data/attack_ver2.jsonl
+    output: ../../results/attack/attack_ver2_window.jsonl
+    feat_output1: ../../results/attack/attack_ver2.jsonl
+    mode: xgt_write_or_fc6_after
+
+  - name: attack_ver5
+    input: ../../data/attack_ver5.jsonl
+    output: ../../results/attack/attack_ver5_window.jsonl
+    feat_output1: ../../results/attack/attack_ver5.jsonl
+    mode: xgt_last_zero
+
+  - name: attack_ver5_1
+    input: ../../data/attack_ver5_1.jsonl
+    output: ../../results/attack/attack_ver5_1_window.jsonl
+    feat_output1: ../../results/attack/attack_ver5_1.jsonl
+    mode: xgt_mid_zero
+
+  - name: attack_ver5_2
+    input: ../../data/attack_ver5_2.jsonl
+    output: ../../results/attack/attack_ver5_2_window.jsonl
+    feat_output1: ../../results/attack/attack_ver5_2.jsonl
+    mode: xgt_head_zero
+
+  - name: attack_ver11
+    input: ../../data/attack_ver11.jsonl
+    output: ../../results/attack/attack_ver11_window.jsonl
+    feat_output1: ../../results/attack/attack_ver11.jsonl
+    mode: xgt_write_or_fc6_after

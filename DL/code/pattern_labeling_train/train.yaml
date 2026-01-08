@@ -1,0 +1,36 @@
+version: 1
+
+paths:
+  data_jsonl: "../../results/train/preprocess_pattern.jsonl"
+  feature_file: "../../data/labeling_model_feature.txt"
+  result_dir: "../../result/model/labeling_model"
+
+data:
+  max_seq_length: 128
+  pad_values: [-1.0, -2.0]
+  drop_labels: ["Noise"]
+  test_size: 0.2
+  random_state: 42
+
+training:
+  num_folds: 3
+  num_epochs: 50
+  batch_size: 32
+  lr: 0.01
+  weight_decay: 0.0
+  num_workers: 0
+  pin_memory: true
+  use_amp: true
+
+model:
+  hidden_dim: 64
+  n_layers: 1
+  dropout: 0.0
+
+early_stopping:
+  patience: 5
+  min_delta: 0.0001
+  metric: "val_f1"   # "val_f1" or "val_loss"
+
+roc:
+  top_n_classes: 5

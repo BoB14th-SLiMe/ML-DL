@@ -109,6 +109,12 @@ if __name__ == "__main__":
 
     save_protocol_values_as_json(protocol_values, output_json)
 
-# """
-# python jsonl_KeyValue_Extract.py -i "ML_DL 학습.jsonl" -o result.json -ek @timestamp
-# """
+"""
+python jsonl_KeyValue_Extract.py -i "./1128 dataset/normal_merged.jsonl" -o "./1128 result/normal.json" -ek @timestamp sq ak fl
+python jsonl_KeyValue_Extract.py -i "./1128 dataset/attack_ver2_merged.jsonl" -o "./1128 result/attack_ver2.json" -ek @timestamp sq ak fl
+python jsonl_KeyValue_Extract.py -i "./1128 dataset/attack_ver5_merged.jsonl" -o "./1128 result/attack_ver5.json" -ek @timestamp sq ak fl
+python jsonl_KeyValue_Extract.py -i "./1128 dataset/attack_ver5_1_merged.jsonl" -o "./1128 result/attack_ver5_1.json" -ek @timestamp sq ak fl
+python jsonl_KeyValue_Extract.py -i "./1128 dataset/attack_ver5_2_merged.jsonl" -o "./1128 result/attack_ver5_2.json" -ek @timestamp sq ak fl
+python jsonl_KeyValue_Extract.py -i "./1128 dataset/attack_ver11_merged.jsonl" -o "./1128 result/attack_ver11.json" -ek @timestamp sq ak fl
+
+"""

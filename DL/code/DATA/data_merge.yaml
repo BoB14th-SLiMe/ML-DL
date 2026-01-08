@@ -1,0 +1,13 @@
+version: 1
+
+defaults:
+  encoding: utf-8-sig
+
+jobs:
+  - name: attack_ver2
+    input: ../../data/first/attack_ver2.jsonl
+    output: ../../results/merged/attack_ver2.jsonl
+
+  - name: attack_ver5
+    input: ../../data/first/attack_ver5.jsonl
+    output: ../../results/merged/attack_ver5.jsonl

@@ -1,0 +1,34 @@
+defaults:
+  # 공통
+  model_dir: ../../results/model/detect_model  # model.h5, config.json, feature_keys.txt, threshold.json 위치
+  output_dir: ../../results/result_train
+  feature_weights_file: ../../results/train/feature_weights.txt
+
+  window_size: 80
+  batch_size: 128
+  threshold: 3
+  ignore_pred_minus1: true
+
+  # plot 옵션
+  smooth_window: 31
+  plot_points: exceed    # none | exceed | all
+  point_stride: 10
+
+  # 에러 처리
+  fail_fast: true
+
+runs:
+  - tag: attack_ver2
+    input: ../../results/attack/attack_ver2.jsonl
+
+  - tag: attack_ver5
+    input: ../../results/attack/attack_ver5.jsonl
+
+  - tag: attack_ver5_1
+    input: ../../results/attack/attack_ver5_1.jsonl
+
+  - tag: attack_ver5_2
+    input: ../../results/attack/attack_ver5_2.jsonl
+
+  - tag: attack_ver11
+    input: ../../results/attack/attack_ver11.jsonl
