@@ -5,8 +5,8 @@ defaults:
   step_size: 5
   mode: auto
 
-  model_dir: ../../../operating/ML/model
-  model_loader: ../../../operating/ML/code/1-1.model_load.py
+  model_dir: ../../../operator/model_load/ML_model
+  model_loader: ../../../operator/model_load/loader_ml.py
   ml_threshold: -126
 
   run_extract: true
