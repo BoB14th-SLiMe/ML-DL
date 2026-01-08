@@ -1,0 +1,63 @@
+source:
+  mode: file    # file | redis
+  input_jsonl: ./attack_data/attack_ver2.jsonl
+
+redis:
+  host: localhost
+  port: 6379
+  db: 0
+  password: null
+
+protocols: [modbus, s7comm, xgt_fen, tcp, udp, dns, arp]
+
+run:
+  run_root: ./final_results
+  stop_after_windows: 999999
+  server: false
+  idle_sleep_sec: 0.01
+  interval_sec: 0.0
+  pps: null
+  replay: false
+  preload_only: false
+
+paths:
+  pre_dir: ../DL/results/preprocessing
+  model_load_dir: ./model_load
+  dl_output_path: ./final_results/dl_anomaly_detect.jsonl
+
+window:
+  size: 80
+  step: 5
+  allow_partial: false
+
+merge:
+  protocols: [modbus, xgt_fen, xgt-fen]
+  bucket_ms: 3
+
+ml:
+  topk: 2
+  warmup: 5
+  skip_stats: 0
+  trim_pct: 0.0
+  hash_fallback: true
+
+dl:
+  warmup: 3
+  skip_stats: 0
+  trim_pct: 0.0
+  threshold: 0.32
+
+alarm:
+  enabled: false
+  base_url: http://192.168.4.140:8080
+  engine: dl
+  timeout: 3.0
+
+tuning:
+  async_batch: 300
+  async_flush_sec: 0.7
+  log_fsync: false
+  data_flow_max_json_chars: 4000
+  heartbeat_sec: 30.0
+  max_raw_packets: 10000000
+  max_prepares: 10000000

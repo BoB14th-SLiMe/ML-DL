@@ -1,0 +1,13 @@
+paths:
+  pre_dir: "../../../DL/results/preprocessing"
+  input_jsonl: "../../../DL/data/RAW.jsonl"
+  output_jsonl: "../../results/preprocessing/preprocessing.jsonl"
+
+options:
+  write_feature_weights: true
+  default_weight: 1.0
+
+input:
+  packet_json: null
+
+  encoding: "utf-8-sig"
