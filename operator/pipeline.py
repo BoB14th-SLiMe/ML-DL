@@ -33,7 +33,7 @@ import sys
 from model_predict.DL_predict import predict_dl_models  # type: ignore  # noqa: E402
 
 _PIPELINE_DIR = Path(__file__).resolve().parent
-_PREPROCESSING_CODE_DIR = (_PIPELINE_DIR / "../../ML/code").resolve()
+_PREPROCESSING_CODE_DIR = (_PIPELINE_DIR / "../ML/code").resolve()
 if str(_PREPROCESSING_CODE_DIR) not in sys.path:
     sys.path.insert(0, str(_PREPROCESSING_CODE_DIR))
 

@@ -21,7 +21,7 @@ run:
   preload_only: false
 
 paths:
-  pre_dir: ../../DL/results/preprocessing
+  pre_dir: ../DL/results/preprocessing
   model_load_dir: ./model_load
   dl_output_path: ./final_results/dl_anomaly_detect.jsonl
 
